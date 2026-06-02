@@ -315,7 +315,7 @@ async def cb_offer_next(c: CallbackQuery):
         return await c.answer(err, show_alert=True)
     total = svc.amount(sel)
     order_id = await db.create_order(c.from_user.id, list(sel), total)
-    await c.message.answer(f'💳 Montant mensuel : {total}€\n\nPayPal :\n{settings.paypal_link}\n\nAprès paiement, envoie ici une capture d’écran.\nCommande #{order_id}')
+    await c.message.answer(f'💳 Montant mensuel : {total}€\n\nPayPal :\n{settings.paypal_link}\n\nAprès paiement, envoie ici une capture d’écran.\nCommande #{order_id}', reply_markup=kb.payment_wait_keyboard())
     await c.answer()
 
 
@@ -365,6 +365,18 @@ async def screenshot(message: Message):
             pass
     await message.answer('✅ Capture reçue. Un admin va vérifier ton paiement.')
 
+
+@r.callback_query(F.data == 'order:cancel_current')
+async def cb_cancel_current_order(c: CallbackQuery):
+    await db.upsert_user(c.from_user)
+    order = await db.cancel_current_order(c.from_user.id)
+    if order:
+        user_selection[c.from_user.id] = set(order['items'])
+        await c.message.answer('❌ Commande annulée. Tu peux choisir une nouvelle offre :', reply_markup=kb.offer_keyboard(set(order['items'])))
+    else:
+        await c.message.answer('Aucune commande active à annuler. Voici les offres :', reply_markup=kb.offer_keyboard())
+    await c.answer()
+
 @r.callback_query(F.data.startswith('order:'))
 async def cb_order(c: CallbackQuery):
     if not is_admin(c.from_user.id): return await c.answer()
@@ -388,17 +400,20 @@ async def cb_order(c: CallbackQuery):
         await c.message.edit_caption((c.message.caption or '') + '\n\n✅ Validée')
         await c.answer('Validé')
     elif action == 'reject':
-        order = await db.decide_order(order_id, c.from_user.id, 'REJECTED')
+        order = await db.decide_order(order_id, c.from_user.id, 'AWAITING_NEW_PROOF')
         if not order:
-            return await c.answer('Commande déjà traitée.', show_alert=True)
-        await svc.safe_send(bot, order['user_id'], '❌ Paiement refusé. Envoie une capture valide ou contacte un admin.')
-        await c.message.edit_caption((c.message.caption or '') + '\n\n❌ Refusée')
-        await c.answer('Refusé')
+            return await c.answer('Commande déjà traitée ou pas encore vérifiable.', show_alert=True)
+        await svc.safe_send(bot, order['user_id'], '❌ Paiement refusé. Envoie une nouvelle capture valide, ou annule pour changer d’offre.', reply_markup=kb.payment_wait_keyboard())
+        await c.message.edit_caption((c.message.caption or '') + '\n\n❌ Refusée — attente nouvelle capture')
+        await c.answer('Nouvelle capture demandée')
     elif action == 'resend':
-        order = await db.get_order(order_id)
+        order = await db.decide_order(order_id, c.from_user.id, 'AWAITING_NEW_PROOF')
         if order:
-            await svc.safe_send(bot, order['user_id'], '📸 Merci de renvoyer une capture plus lisible du paiement.')
-        await c.answer('Demande envoyée')
+            await svc.safe_send(bot, order['user_id'], '📸 Merci de renvoyer une capture plus lisible du paiement, ou annule pour changer d’offre.', reply_markup=kb.payment_wait_keyboard())
+            await c.message.edit_caption((c.message.caption or '') + '\n\n📸 Nouvelle capture demandée')
+            await c.answer('Demande envoyée')
+        else:
+            await c.answer('Commande déjà traitée ou pas encore vérifiable.', show_alert=True)
 
 async def kick_expired_demos():
     gs = await db.group_by_type('VIP_PREVIEW')

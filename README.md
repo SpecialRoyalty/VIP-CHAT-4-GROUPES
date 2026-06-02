@@ -80,3 +80,11 @@ Le bot doit être administrateur avec :
 ## Note importante
 
 Utilise uniquement du contenu légal, autorisé et conforme aux règles Telegram et PayPal.
+
+## Correctif refus / nouvelle capture
+
+- Si un admin refuse une capture, la commande passe en `AWAITING_NEW_PROOF` au lieu d'être fermée.
+- L'utilisateur peut renvoyer une nouvelle capture sans refaire toute la commande.
+- La nouvelle capture repasse la commande en `WAITING_ADMIN` et remplace l'ancienne preuve.
+- L'utilisateur peut cliquer sur `❌ Annuler et changer d’offre` pour fermer la commande et revenir au choix des offres.
+- Une commande déjà validée/annulée ne peut pas être validée une deuxième fois.

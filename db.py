@@ -140,14 +140,14 @@ async def mark_demo_kicked(user_id: int):
 
 async def create_order(user_id: int, items: list[str], amount: int) -> int:
     async with pool().acquire() as con:
-        existing = await con.fetchval("SELECT id FROM orders WHERE user_id=$1 AND status IN ('WAITING_SCREEN','WAITING_ADMIN')", user_id)
+        existing = await con.fetchval("SELECT id FROM orders WHERE user_id=$1 AND status IN ('WAITING_SCREEN','WAITING_ADMIN','AWAITING_NEW_PROOF')", user_id)
         if existing:
             return existing
         return await con.fetchval('INSERT INTO orders(user_id,items,amount) VALUES($1,$2,$3) RETURNING id', user_id, items, amount)
 
 async def attach_screenshot(user_id: int, file_id: str):
     async with pool().acquire() as con:
-        return await con.fetchrow("UPDATE orders SET screenshot_file_id=$2,status='WAITING_ADMIN' WHERE user_id=$1 AND status='WAITING_SCREEN' RETURNING *", user_id, file_id)
+        return await con.fetchrow("UPDATE orders SET screenshot_file_id=$2,status='WAITING_ADMIN',decided_at=NULL,decided_by=NULL WHERE user_id=$1 AND status IN ('WAITING_SCREEN','WAITING_ADMIN','AWAITING_NEW_PROOF') RETURNING *", user_id, file_id)
 
 async def get_order(order_id: int):
     async with pool().acquire() as con:
@@ -157,7 +157,17 @@ async def decide_order(order_id: int, admin_id: int, status: str):
     async with pool().acquire() as con:
         async with con.transaction():
             order = await con.fetchrow("SELECT * FROM orders WHERE id=$1 FOR UPDATE", order_id)
-            if not order or order['status'] not in ('WAITING_ADMIN','WAITING_SCREEN'):
+            if not order:
+                return None
+            if status == 'APPROVED':
+                allowed = ('WAITING_ADMIN',)
+            elif status == 'AWAITING_NEW_PROOF':
+                allowed = ('WAITING_ADMIN',)
+            elif status in ('REJECTED','CANCELLED'):
+                allowed = ('WAITING_ADMIN','WAITING_SCREEN','AWAITING_NEW_PROOF')
+            else:
+                allowed = ('WAITING_ADMIN',)
+            if order['status'] not in allowed:
                 return None
             await con.execute('UPDATE orders SET status=$2,decided_at=now(),decided_by=$3 WHERE id=$1', order_id, status, admin_id)
             return order
@@ -195,6 +205,29 @@ async def expired_subscriptions():
 async def deactivate_subscription(sub_id: int):
     async with pool().acquire() as con:
         await con.execute('UPDATE subscriptions SET active=false WHERE id=$1', sub_id)
+
+async def cancel_current_order(user_id: int):
+    async with pool().acquire() as con:
+        return await con.fetchrow("""
+            UPDATE orders
+            SET status='CANCELLED', decided_at=now()
+            WHERE id = (
+                SELECT id FROM orders
+                WHERE user_id=$1 AND status IN ('WAITING_SCREEN','WAITING_ADMIN','AWAITING_NEW_PROOF')
+                ORDER BY created_at DESC
+                LIMIT 1
+            )
+            RETURNING *
+        """, user_id)
+
+async def current_open_order(user_id: int):
+    async with pool().acquire() as con:
+        return await con.fetchrow("""
+            SELECT * FROM orders
+            WHERE user_id=$1 AND status IN ('WAITING_SCREEN','WAITING_ADMIN','AWAITING_NEW_PROOF')
+            ORDER BY created_at DESC
+            LIMIT 1
+        """, user_id)
 
 async def pending_orders():
     async with pool().acquire() as con:

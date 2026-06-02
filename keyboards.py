@@ -54,8 +54,14 @@ def offer_keyboard(selection: set[str] | None = None) -> InlineKeyboardMarkup:
 
 def validate_keyboard(order_id: int) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text='✅ Valider', callback_data=f'order:approve:{order_id}'), InlineKeyboardButton(text='❌ Refuser', callback_data=f'order:reject:{order_id}')],
-        [InlineKeyboardButton(text='📸 Nouvelle capture', callback_data=f'order:resend:{order_id}')]
+        [InlineKeyboardButton(text='✅ Valider', callback_data=f'order:approve:{order_id}'), InlineKeyboardButton(text='❌ Refuser / nouvelle capture', callback_data=f'order:reject:{order_id}')],
+        [InlineKeyboardButton(text='📸 Demander une nouvelle capture', callback_data=f'order:resend:{order_id}')]
+    ])
+
+
+def payment_wait_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text='❌ Annuler et changer d’offre', callback_data='order:cancel_current')]
     ])
 
 
