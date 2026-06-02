@@ -191,3 +191,16 @@ async def deactivate_subscription(sub_id: int):
 async def pending_orders():
     async with pool().acquire() as con:
         return await con.fetch("SELECT * FROM orders WHERE status='WAITING_ADMIN' ORDER BY created_at")
+
+async def get_setting(key: str, default: str | None = None):
+    async with pool().acquire() as con:
+        val = await con.fetchval('SELECT value FROM settings WHERE key=$1', key)
+        return default if val is None else val
+
+async def set_setting(key: str, value: str):
+    async with pool().acquire() as con:
+        await con.execute('INSERT INTO settings(key,value) VALUES($1,$2) ON CONFLICT(key) DO UPDATE SET value=$2', key, value)
+
+async def recent_orders(limit: int = 10):
+    async with pool().acquire() as con:
+        return await con.fetch('SELECT * FROM orders ORDER BY created_at DESC LIMIT $1', limit)

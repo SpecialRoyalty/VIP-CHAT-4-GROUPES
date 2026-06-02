@@ -19,7 +19,7 @@ def admin_panel() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text='👥 Groupes', callback_data='admin:groups'), InlineKeyboardButton(text='ℹ️ Infos système', callback_data='admin:info')],
         [InlineKeyboardButton(text='💳 Paiement PayPal', callback_data='admin:paypal'), InlineKeyboardButton(text='📦 Commandes', callback_data='admin:orders')],
-        [InlineKeyboardButton(text='📢 Envoyer publicité', callback_data='admin:send_ad')],
+        [InlineKeyboardButton(text='📢 Publicités', callback_data='admin:ads')],
     ])
 
 
@@ -57,3 +57,33 @@ def validate_keyboard(order_id: int) -> InlineKeyboardMarkup:
         [InlineKeyboardButton(text='✅ Valider', callback_data=f'order:approve:{order_id}'), InlineKeyboardButton(text='❌ Refuser', callback_data=f'order:reject:{order_id}')],
         [InlineKeyboardButton(text='📸 Nouvelle capture', callback_data=f'order:resend:{order_id}')]
     ])
+
+
+
+def ads_panel() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text='✏️ Modifier texte', callback_data='ad:set_text'), InlineKeyboardButton(text='🖼 Modifier image', callback_data='ad:set_photo')],
+        [InlineKeyboardButton(text='👁 Prévisualiser', callback_data='ad:preview')],
+        [InlineKeyboardButton(text='📤 Choisir les groupes et envoyer', callback_data='ad:choose_groups')],
+        [InlineKeyboardButton(text='🗑 Retirer image', callback_data='ad:clear_photo')],
+        [InlineKeyboardButton(text='🔙 Retour', callback_data='admin:panel')],
+    ])
+
+
+def ad_groups(groups, selected: set[int] | None = None) -> InlineKeyboardMarkup:
+    selected = selected or set()
+    rows = []
+    for g in groups:
+        mark = '✅' if int(g['chat_id']) in selected else '☐'
+        rows.append([InlineKeyboardButton(text=f"{mark} {g['title']}", callback_data=f"ad:toggle_group:{g['chat_id']}")])
+    rows.append([InlineKeyboardButton(text='📤 Envoyer aux groupes cochés', callback_data='ad:send_selected')])
+    rows.append([InlineKeyboardButton(text='🔙 Retour publicités', callback_data='admin:ads')])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def orders_panel(orders) -> InlineKeyboardMarkup:
+    rows = []
+    for o in orders:
+        rows.append([InlineKeyboardButton(text=f"Commande #{o['id']} — {o['status']} — {o['amount']}€", callback_data=f"order:view:{o['id']}")])
+    rows.append([InlineKeyboardButton(text='🔙 Retour', callback_data='admin:panel')])
+    return InlineKeyboardMarkup(inline_keyboard=rows)

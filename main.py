@@ -20,6 +20,8 @@ dp = Dispatcher()
 r = Router()
 dp.include_router(r)
 user_selection: dict[int, set[str]] = {}
+admin_modes: dict[int, str] = {}
+ad_group_selection: dict[int, set[int]] = {}
 
 
 def is_admin(user_id: int) -> bool:
@@ -165,21 +167,131 @@ async def cb_paypal(c: CallbackQuery):
     await c.message.answer('💳 PayPal actuel :\n' + (settings.paypal_link or 'Non configuré') + '\n\nPour modifier : change PAYPAL_LINK dans Railway puis redémarre.')
     await c.answer()
 
+
+async def get_ad_config():
+    text = await db.get_setting('ad_text', '🔥 Accès VIP\n\nDémo gratuite puis abonnement mensuel. Clique ici :')
+    photo = await db.get_setting('ad_photo_file_id', '')
+    return text, photo
+
+async def send_ad_to_group(chat_id: int) -> bool:
+    me = await bot.get_me()
+    text, photo = await get_ad_config()
+    markup = kb.access_vip()
+    markup.inline_keyboard[0][0].url = f'https://t.me/{me.username}?start=vip'
+    try:
+        if photo:
+            await bot.send_photo(chat_id, photo, caption=text, reply_markup=markup)
+        else:
+            await bot.send_message(chat_id, text, reply_markup=markup)
+        return True
+    except Exception as e:
+        await db.log('ERROR', f'Pub impossible groupe={chat_id}: {e}')
+        return False
+
 @r.callback_query(F.data == 'admin:send_ad')
 async def cb_send_ad(c: CallbackQuery):
     if not is_admin(c.from_user.id): return await c.answer()
-    pubs = await db.group_by_type('PUBLICITE')
+    await c.message.edit_text('📢 Publicités', reply_markup=kb.ads_panel())
+    await c.answer()
+
+@r.callback_query(F.data == 'admin:ads')
+async def cb_ads(c: CallbackQuery):
+    if not is_admin(c.from_user.id): return await c.answer()
+    await c.message.edit_text('📢 Publicités', reply_markup=kb.ads_panel())
+    await c.answer()
+
+@r.callback_query(F.data == 'ad:set_text')
+async def cb_ad_set_text(c: CallbackQuery):
+    if not is_admin(c.from_user.id): return await c.answer()
+    admin_modes[c.from_user.id] = 'ad_text'
+    await c.message.answer('✏️ Envoie maintenant le nouveau texte de publicité.')
+    await c.answer()
+
+@r.callback_query(F.data == 'ad:set_photo')
+async def cb_ad_set_photo(c: CallbackQuery):
+    if not is_admin(c.from_user.id): return await c.answer()
+    admin_modes[c.from_user.id] = 'ad_photo'
+    await c.message.answer('🖼 Envoie maintenant la photo/image de publicité.')
+    await c.answer()
+
+@r.callback_query(F.data == 'ad:clear_photo')
+async def cb_ad_clear_photo(c: CallbackQuery):
+    if not is_admin(c.from_user.id): return await c.answer()
+    await db.set_setting('ad_photo_file_id', '')
+    await c.message.answer('✅ Image de publicité retirée.')
+    await c.answer()
+
+@r.callback_query(F.data == 'ad:preview')
+async def cb_ad_preview(c: CallbackQuery):
+    if not is_admin(c.from_user.id): return await c.answer()
+    text, photo = await get_ad_config()
     me = await bot.get_me()
+    markup = kb.access_vip()
+    markup.inline_keyboard[0][0].url = f'https://t.me/{me.username}?start=vip'
+    if photo:
+        await c.message.answer_photo(photo, caption=text, reply_markup=markup)
+    else:
+        await c.message.answer(text, reply_markup=markup)
+    await c.answer()
+
+@r.callback_query(F.data == 'ad:choose_groups')
+async def cb_ad_choose_groups(c: CallbackQuery):
+    if not is_admin(c.from_user.id): return await c.answer()
+    pubs = await db.group_by_type('PUBLICITE')
+    ad_group_selection[c.from_user.id] = set()
+    if not pubs:
+        await c.message.answer('Aucun groupe de publicité configuré. Va dans 👥 Groupes et associe au moins un groupe en PUBLICITE.')
+    else:
+        await c.message.edit_text('Choisis un ou plusieurs groupes de publicité :', reply_markup=kb.ad_groups(pubs, set()))
+    await c.answer()
+
+@r.callback_query(F.data.startswith('ad:toggle_group:'))
+async def cb_ad_toggle_group(c: CallbackQuery):
+    if not is_admin(c.from_user.id): return await c.answer()
+    chat_id = int(c.data.split(':')[2])
+    sel = ad_group_selection.setdefault(c.from_user.id, set())
+    if chat_id in sel: sel.remove(chat_id)
+    else: sel.add(chat_id)
+    pubs = await db.group_by_type('PUBLICITE')
+    await c.message.edit_reply_markup(reply_markup=kb.ad_groups(pubs, sel))
+    await c.answer()
+
+@r.callback_query(F.data == 'ad:send_selected')
+async def cb_ad_send_selected(c: CallbackQuery):
+    if not is_admin(c.from_user.id): return await c.answer()
+    selected = ad_group_selection.get(c.from_user.id, set())
+    if not selected:
+        return await c.answer('Coche au moins un groupe.', show_alert=True)
     sent = 0
-    for g in pubs:
-        try:
-            markup = kb.access_vip()
-            markup.inline_keyboard[0][0].url = f'https://t.me/{me.username}?start=vip'
-            await bot.send_message(g['chat_id'], '🔥 Accès VIP\n\nDémo gratuite puis abonnement mensuel. Clique ici :', reply_markup=markup)
+    for chat_id in selected:
+        if await send_ad_to_group(chat_id):
             sent += 1
-        except Exception as e:
-            await db.log('ERROR', f'Pub impossible groupe={g["chat_id"]}: {e}')
-    await c.message.answer(f'📢 Publicité envoyée dans {sent} groupe(s).')
+    await c.message.answer(f'📢 Publicité envoyée dans {sent}/{len(selected)} groupe(s).')
+    await c.answer()
+
+
+@r.callback_query(F.data == 'admin:orders')
+async def cb_orders(c: CallbackQuery):
+    if not is_admin(c.from_user.id): return await c.answer()
+    orders = await db.recent_orders(15)
+    if not orders:
+        await c.message.answer('📦 Aucune commande pour le moment.')
+    else:
+        await c.message.edit_text('📦 Commandes récentes', reply_markup=kb.orders_panel(orders))
+    await c.answer()
+
+@r.callback_query(F.data.startswith('order:view:'))
+async def cb_order_view(c: CallbackQuery):
+    if not is_admin(c.from_user.id): return await c.answer()
+    oid = int(c.data.split(':')[2])
+    order = await db.get_order(oid)
+    if not order:
+        return await c.answer('Commande introuvable.', show_alert=True)
+    txt = f"📦 Commande #{order['id']}\nStatut : {order['status']}\nUtilisateur : {order['user_id']}\nChoix : {svc.item_text(order['items'])}\nMontant : {order['amount']}€/mois"
+    if order['screenshot_file_id']:
+        await c.message.answer_photo(order['screenshot_file_id'], caption=txt, reply_markup=kb.validate_keyboard(order['id']))
+    else:
+        await c.message.answer(txt)
     await c.answer()
 
 @r.callback_query(F.data.startswith('offer:toggle:'))
@@ -206,8 +318,32 @@ async def cb_offer_next(c: CallbackQuery):
     await c.message.answer(f'💳 Montant mensuel : {total}€\n\nPayPal :\n{settings.paypal_link}\n\nAprès paiement, envoie ici une capture d’écran.\nCommande #{order_id}')
     await c.answer()
 
+
+@r.message(F.chat.type == ChatType.PRIVATE, F.text)
+async def admin_text_inputs(message: Message):
+    if not is_admin(message.from_user.id):
+        return
+    mode = admin_modes.get(message.from_user.id)
+    if mode == 'ad_text':
+        await db.set_setting('ad_text', message.text)
+        admin_modes.pop(message.from_user.id, None)
+        await message.answer('✅ Texte de publicité enregistré.', reply_markup=kb.ads_panel())
+
 @r.message(F.photo | F.document)
 async def screenshot(message: Message):
+    if is_admin(message.from_user.id) and admin_modes.get(message.from_user.id) == 'ad_photo':
+        file_id = None
+        if message.photo:
+            file_id = message.photo[-1].file_id
+        elif message.document and message.document.mime_type and message.document.mime_type.startswith('image/'):
+            file_id = message.document.file_id
+        if not file_id:
+            await message.answer('Image illisible. Envoie une photo ou un document image.')
+            return
+        await db.set_setting('ad_photo_file_id', file_id)
+        admin_modes.pop(message.from_user.id, None)
+        await message.answer('✅ Image de publicité enregistrée.', reply_markup=kb.ads_panel())
+        return
     await db.upsert_user(message.from_user)
     file_id = None
     if message.photo:
