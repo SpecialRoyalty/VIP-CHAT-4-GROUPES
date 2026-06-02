@@ -22,9 +22,14 @@ CREATE TABLE IF NOT EXISTS users (
 );
 CREATE TABLE IF NOT EXISTS demos (
   user_id BIGINT PRIMARY KEY REFERENCES users(user_id) ON DELETE CASCADE,
+  chat_id BIGINT,
   invite_link TEXT,
   joined_at TIMESTAMPTZ,
   kicked_at TIMESTAMPTZ,
+  revoked_at TIMESTAMPTZ,
+  kick_error TEXT,
+  kick_attempts INTEGER NOT NULL DEFAULT 0,
+  kick_alerted_at TIMESTAMPTZ,
   created_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 CREATE TABLE IF NOT EXISTS orders (
@@ -61,6 +66,10 @@ CREATE TABLE IF NOT EXISTS events_log (
   message TEXT NOT NULL,
   created_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
+
+-- Migrations sûres pour bases déjà déployées
+ALTER TABLE demos ADD COLUMN IF NOT EXISTS kick_attempts INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE demos ADD COLUMN IF NOT EXISTS kick_alerted_at TIMESTAMPTZ;
 '''
 
 _pool: asyncpg.Pool | None = None
@@ -120,11 +129,24 @@ async def has_demo_used(user_id: int) -> bool:
     async with pool().acquire() as con:
         return bool(await con.fetchval('SELECT demo_used FROM users WHERE user_id=$1', user_id))
 
-async def create_demo(user_id: int, invite_link: str):
+async def create_demo(user_id: int, chat_id: int, invite_link: str):
     async with pool().acquire() as con:
         async with con.transaction():
             await con.execute('UPDATE users SET demo_used=true WHERE user_id=$1', user_id)
-            await con.execute('INSERT INTO demos(user_id, invite_link) VALUES($1,$2) ON CONFLICT(user_id) DO NOTHING', user_id, invite_link)
+            await con.execute('''
+                INSERT INTO demos(user_id, chat_id, invite_link)
+                VALUES($1,$2,$3)
+                ON CONFLICT(user_id) DO UPDATE SET
+                  chat_id=EXCLUDED.chat_id,
+                  invite_link=EXCLUDED.invite_link,
+                  joined_at=NULL,
+                  kicked_at=NULL,
+                  revoked_at=NULL,
+                  kick_error=NULL,
+                  kick_attempts=0,
+                  kick_alerted_at=NULL,
+                  created_at=now()
+            ''', user_id, chat_id, invite_link)
 
 async def set_demo_joined(user_id: int):
     async with pool().acquire() as con:
@@ -132,11 +154,38 @@ async def set_demo_joined(user_id: int):
 
 async def demos_to_kick(minutes: int):
     async with pool().acquire() as con:
-        return await con.fetch("SELECT * FROM demos WHERE kicked_at IS NULL AND created_at < now() - ($1 || ' minutes')::interval", str(minutes))
+        # Timer fiable : 4 minutes après joined_at si connu, sinon après création du lien.
+        return await con.fetch(
+            """SELECT * FROM demos
+               WHERE kicked_at IS NULL
+               AND COALESCE(joined_at, created_at) < now() - ($1 || ' minutes')::interval""",
+            str(minutes)
+        )
 
 async def mark_demo_kicked(user_id: int):
     async with pool().acquire() as con:
-        await con.execute('UPDATE demos SET kicked_at=now() WHERE user_id=$1', user_id)
+        await con.execute('UPDATE demos SET kicked_at=now(), kick_error=NULL WHERE user_id=$1', user_id)
+
+async def mark_demo_kick_failed(user_id: int, error: str):
+    async with pool().acquire() as con:
+        return await con.fetchrow('''
+            UPDATE demos
+            SET kick_error=$2, kick_attempts=kick_attempts+1
+            WHERE user_id=$1
+            RETURNING *
+        ''', user_id, error[:1000])
+
+async def mark_demo_kick_alerted(user_id: int):
+    async with pool().acquire() as con:
+        await con.execute('UPDATE demos SET kick_alerted_at=now() WHERE user_id=$1', user_id)
+
+async def mark_demo_invite_revoked(user_id: int):
+    async with pool().acquire() as con:
+        await con.execute('UPDATE demos SET revoked_at=now() WHERE user_id=$1', user_id)
+
+async def demo_for_user(user_id: int):
+    async with pool().acquire() as con:
+        return await con.fetchrow('SELECT * FROM demos WHERE user_id=$1', user_id)
 
 async def create_order(user_id: int, items: list[str], amount: int) -> int:
     async with pool().acquire() as con:

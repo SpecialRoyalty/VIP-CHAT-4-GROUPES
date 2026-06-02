@@ -89,7 +89,7 @@ async def give_demo(message: Message):
         return
     try:
         link = await svc.create_unique_invite(bot, gs[0]['chat_id'], settings.invite_expire_minutes)
-        await db.create_demo(user_id, link)
+        await db.create_demo(user_id, gs[0]['chat_id'], link)
         await message.answer('✅ Voici ton accès démo unique :\n' + link)
     except Exception as e:
         await message.answer('Erreur lors de la création du lien démo. Un admin a été prévenu.')
@@ -100,7 +100,27 @@ async def user_joined_group(event: ChatMemberUpdated):
     if event.new_chat_member.status in {'member', 'administrator'}:
         gs = await db.group_by_type('VIP_PREVIEW')
         if gs and event.chat.id == gs[0]['chat_id']:
-            await db.set_demo_joined(event.new_chat_member.user.id)
+            user_id = event.new_chat_member.user.id
+            demo = await db.demo_for_user(user_id)
+            if demo and demo['kicked_at'] is None:
+                await db.set_demo_joined(user_id)
+            else:
+                # Sécurité : toute entrée dans le groupe démo sans session active est expulsée.
+                try:
+                    await bot.ban_chat_member(event.chat.id, user_id)
+                    await bot.unban_chat_member(event.chat.id, user_id, only_if_banned=True)
+                    await db.log('WARNING', f'Entrée preview non autorisée expulsée user={user_id} group={event.chat.id}')
+                except Exception as e:
+                    err = str(e)
+                    await db.log('ERROR', f'Kick entrée preview non autorisée impossible user={user_id} group={event.chat.id}: {err}')
+                    await notify_admins(
+                        '🚨 Échec expulsion entrée non autorisée\n\n'
+                        f'Utilisateur ID : {user_id}\n'
+                        f'Groupe : {event.chat.title or event.chat.id}\n'
+                        f'ID Groupe : {event.chat.id}\n\n'
+                        f'Erreur Telegram : {err}\n\n'
+                        'Vérifie que le bot est admin et possède le droit “Bannir des membres”.'
+                    )
 
 @r.callback_query(F.data == 'admin:panel')
 async def cb_panel(c: CallbackQuery):
@@ -303,7 +323,11 @@ async def cb_offer_toggle(c: CallbackQuery):
         if item == 'VIP_NON_TELECHARGEABLE': sel.discard('VIP_TELECHARGEABLE')
         if item == 'VIP_TELECHARGEABLE': sel.discard('VIP_NON_TELECHARGEABLE')
         sel.add(item)
-    await c.message.edit_reply_markup(reply_markup=kb.offer_keyboard(sel))
+    try:
+        await c.message.edit_reply_markup(reply_markup=kb.offer_keyboard(sel))
+    except Exception as e:
+        if 'message is not modified' not in str(e):
+            raise
     await c.answer()
 
 @r.callback_query(F.data == 'offer:next')
@@ -417,17 +441,43 @@ async def cb_order(c: CallbackQuery):
 
 async def kick_expired_demos():
     gs = await db.group_by_type('VIP_PREVIEW')
-    if not gs: return
-    chat_id = gs[0]['chat_id']
+    if not gs:
+        return
+    fallback_chat_id = gs[0]['chat_id']
     for demo in await db.demos_to_kick(settings.demo_duration_minutes):
+        user_id = demo['user_id']
+        chat_id = demo['chat_id'] or fallback_chat_id
         try:
-            await bot.ban_chat_member(chat_id, demo['user_id'])
-            await bot.unban_chat_member(chat_id, demo['user_id'], only_if_banned=True)
-            await svc.safe_send(bot, demo['user_id'], '⏱️ Ta démo est terminée. Tu peux maintenant choisir ton accès mensuel.', reply_markup=kb.offer_keyboard())
+            await db.log('INFO', f'Tentative kick demo user={user_id} group={chat_id}')
+            await bot.ban_chat_member(chat_id, user_id)
+            await bot.unban_chat_member(chat_id, user_id, only_if_banned=True)
+            if demo['invite_link']:
+                try:
+                    await bot.revoke_chat_invite_link(chat_id, demo['invite_link'])
+                    await db.mark_demo_invite_revoked(user_id)
+                except Exception as revoke_error:
+                    await db.log('WARNING', f'Revocation lien demo impossible user={user_id}: {revoke_error}')
+            await db.mark_demo_kicked(user_id)
+            await db.log('INFO', f'Kick demo réussi user={user_id} group={chat_id}')
+            await svc.safe_send(bot, user_id, '⏱️ Ta démo est terminée. Tu peux maintenant choisir ton accès mensuel.', reply_markup=kb.offer_keyboard())
         except Exception as e:
-            await db.log('ERROR', f'Kick demo impossible user={demo["user_id"]}: {e}')
-        finally:
-            await db.mark_demo_kicked(demo['user_id'])
+            # IMPORTANT : on ne met PAS kicked_at si Telegram refuse le kick.
+            err = str(e)
+            failed_demo = await db.mark_demo_kick_failed(user_id, err)
+            attempts = failed_demo['kick_attempts'] if failed_demo and 'kick_attempts' in failed_demo else 1
+            await db.log('ERROR', f'Kick demo impossible user={user_id} group={chat_id} attempt={attempts}: {err}')
+
+            # Alerte admin immédiate, puis rappel toutes les 5 tentatives pour éviter le spam.
+            if attempts == 1 or attempts % 5 == 0:
+                await db.mark_demo_kick_alerted(user_id)
+                await notify_admins(
+                    '🚨 Échec expulsion démo\n\n'
+                    f'Utilisateur ID : {user_id}\n'
+                    f'Groupe Preview ID : {chat_id}\n'
+                    f'Tentative : {attempts}\n\n'
+                    f'Erreur Telegram : {err}\n\n'
+                    'Le bot va réessayer automatiquement. Vérifie dans le groupe Preview que le bot a bien le droit “Bannir des membres”.'
+                )
 
 async def monthly_reminders_and_expiry():
     for days in (10, 5, 3):
