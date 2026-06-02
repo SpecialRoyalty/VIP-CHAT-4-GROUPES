@@ -162,11 +162,19 @@ async def decide_order(order_id: int, admin_id: int, status: str):
             await con.execute('UPDATE orders SET status=$2,decided_at=now(),decided_by=$3 WHERE id=$1', order_id, status, admin_id)
             return order
 
+async def active_subscription(user_id: int):
+    async with pool().acquire() as con:
+        return await con.fetchrow('SELECT * FROM subscriptions WHERE user_id=$1 AND active=true ORDER BY expires_at DESC LIMIT 1', user_id)
+
 async def activate_subscription(user_id: int, items: list[str], order_id: int, days: int):
     now = datetime.now(timezone.utc)
-    expires = now + timedelta(days=days)
     async with pool().acquire() as con:
         async with con.transaction():
+            current = await con.fetchrow('SELECT * FROM subscriptions WHERE user_id=$1 AND active=true ORDER BY expires_at DESC LIMIT 1 FOR UPDATE', user_id)
+            # Renouvellement : si l'abonnement existe encore, on ajoute 30 jours à l'expiration actuelle.
+            # Si l'abonnement est déjà expiré ou absent, on repart de maintenant.
+            base = current['expires_at'] if current and current['expires_at'] > now else now
+            expires = base + timedelta(days=days)
             await con.execute('UPDATE subscriptions SET active=false WHERE user_id=$1 AND active=true', user_id)
             return await con.fetchrow('INSERT INTO subscriptions(user_id,items,starts_at,expires_at,order_id) VALUES($1,$2,$3,$4,$5) RETURNING *', user_id, items, now, expires, order_id)
 

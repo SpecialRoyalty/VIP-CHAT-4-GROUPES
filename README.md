@@ -12,7 +12,7 @@
   - VIP téléchargeable : 10€/mois
   - Rediffusion : 10€/mois
   - VIP non téléchargeable + rediffusion : 18€/mois
-  - VIP téléchargeable + rediffusion : 18€/mois
+  - VIP téléchargeable + rediffusion : 20€/mois
 - Paiement PayPal via lien configurable dans Railway.
 - Capture envoyée aux admins.
 - Validation/refus admin.

@@ -100,7 +100,7 @@ async def user_joined_group(event: ChatMemberUpdated):
     if event.new_chat_member.status in {'member', 'administrator'}:
         gs = await db.group_by_type('VIP_PREVIEW')
         if gs and event.chat.id == gs[0]['chat_id']:
-            await db.set_demo_joined(event.from_user.id)
+            await db.set_demo_joined(event.new_chat_member.user.id)
 
 @r.callback_query(F.data == 'admin:panel')
 async def cb_panel(c: CallbackQuery):
@@ -374,7 +374,13 @@ async def cb_order(c: CallbackQuery):
         order = await db.decide_order(order_id, c.from_user.id, 'APPROVED')
         if not order:
             return await c.answer('Commande déjà traitée.', show_alert=True)
+        old_sub = await db.active_subscription(order['user_id'])
+        old_items = set(old_sub['items']) if old_sub else set()
+        new_items = set(order['items'])
+        removed_items = list(old_items - new_items)
         await db.activate_subscription(order['user_id'], list(order['items']), order_id, settings.subscription_days)
+        if removed_items:
+            await svc.kick_user_from_groups(bot, order['user_id'], removed_items)
         try:
             await svc.grant_access(bot, order['user_id'], list(order['items']), settings.invite_expire_minutes)
         except Exception as e:

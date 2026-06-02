@@ -23,9 +23,9 @@ def validate_items(items: set[str]) -> tuple[bool, str]:
 
 
 def amount(items: set[str]) -> int:
-    # Offres mensuelles. Le bundle VIP téléchargeable + rediffusion est plafonné à 18€.
-    if items == {'VIP_TELECHARGEABLE', 'REDIFFUSION'}:
-        return 18
+    # Offres mensuelles additionnées :
+    # VIP non téléchargeable 8€, VIP téléchargeable 10€, Rediffusion 10€.
+    # Donc VIP téléchargeable + Rediffusion = 20€/mois.
     return sum(PRICES[i] for i in items)
 
 
