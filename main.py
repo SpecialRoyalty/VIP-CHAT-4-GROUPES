@@ -9,7 +9,7 @@ from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
 from config import load_settings
 from db import Database
-from keyboards import admin_panel, group_type_keyboard, offer_keyboard, admin_order_keyboard
+from keyboards import admin_panel, group_type_keyboard, groups_list_keyboard, offer_keyboard, admin_order_keyboard
 from services import (
     upsert_user, create_demo, calculate_amount, kick_expired_demos,
     system_check, grant_accesses, reject_order
@@ -66,6 +66,18 @@ async def admin(message: Message):
     await message.answer('👑 Panel admin', reply_markup=admin_panel())
 
 
+
+@dp.message(Command('groupes'))
+async def groups_command(message: Message):
+    if not is_admin(message.from_user.id):
+        return
+    rows = await db.fetch('SELECT chat_id,title,type,active FROM groups ORDER BY created_at DESC LIMIT 50')
+    if not rows:
+        await message.answer('Aucun groupe détecté.')
+        return
+    txt = '👥 Groupes détectés\n\nClique sur un groupe pour lui associer un type :\n\n' + '\n'.join([f'{"✅" if r["active"] else "❌"} {r["title"]} — {r["type"]} — {r["chat_id"]}' for r in rows])
+    await message.answer(txt, reply_markup=groups_list_keyboard(rows))
+
 @dp.my_chat_member()
 async def bot_added_or_removed(event: ChatMemberUpdated):
     chat = event.chat
@@ -102,13 +114,30 @@ async def set_group_type(call: CallbackQuery):
     await call.message.edit_text(f'✅ Groupe configuré en : {typ}')
 
 
+
+@dp.callback_query(F.data.startswith('group:choose:'))
+async def choose_group_to_configure(call: CallbackQuery):
+    if not is_admin(call.from_user.id):
+        return await call.answer('Accès refusé', show_alert=True)
+    chat_id = int(call.data.split(':')[2])
+    row = await db.fetchrow('SELECT chat_id,title,type,active FROM groups WHERE chat_id=$1', chat_id)
+    if not row:
+        return await call.answer('Groupe introuvable', show_alert=True)
+    await call.message.answer(
+        f'⚙️ Configuration du groupe :\n{row["title"]}\nID : {row["chat_id"]}\nType actuel : {row["type"]}\n\nChoisis le bon type :',
+        reply_markup=group_type_keyboard(chat_id)
+    )
+    await call.answer()
+
 @dp.callback_query(F.data.startswith('admin:'))
 async def admin_buttons(call: CallbackQuery):
     if not is_admin(call.from_user.id):
         return await call.answer('Accès refusé', show_alert=True)
     action = call.data.split(':')[1]
 
-    if action == 'info':
+    if action == 'panel':
+        await call.message.answer('👑 Panel admin', reply_markup=admin_panel())
+    elif action == 'info':
         await call.message.answer(await system_check(db, bot, settings))
     elif action == 'repair':
         await repair_groups(call.message)
@@ -119,10 +148,10 @@ async def admin_buttons(call: CallbackQuery):
     elif action == 'groups':
         rows = await db.fetch('SELECT chat_id,title,type,active FROM groups ORDER BY created_at DESC LIMIT 50')
         if not rows:
-            await call.message.answer('Aucun groupe détecté.')
+            await call.message.answer('Aucun groupe détecté. Ajoute le bot dans tes groupes puis clique sur 🔧 Réparer / Revérifier.')
         else:
-            txt = '👥 Groupes détectés\n\n' + '\n'.join([f'{"✅" if r["active"] else "❌"} {r["title"]} — {r["type"]} — {r["chat_id"]}' for r in rows])
-            await call.message.answer(txt)
+            txt = '👥 Groupes détectés\n\nClique sur un groupe pour lui associer un type :\n\n' + '\n'.join([f'{"✅" if r["active"] else "❌"} {r["title"]} — {r["type"]} — {r["chat_id"]}' for r in rows])
+            await call.message.answer(txt, reply_markup=groups_list_keyboard(rows))
     elif action == 'orders':
         rows = await db.fetch("SELECT id,user_id,username,selected_vip,rediffusion,amount,status FROM orders ORDER BY created_at DESC LIMIT 20")
         if not rows:

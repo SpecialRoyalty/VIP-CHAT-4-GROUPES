@@ -41,3 +41,17 @@ def admin_order_keyboard(order_id: int):
         [InlineKeyboardButton(text='✅ Valider', callback_data=f'order:approve:{order_id}'), InlineKeyboardButton(text='❌ Refuser', callback_data=f'order:reject:{order_id}')],
         [InlineKeyboardButton(text='✉️ Demander nouvelle capture', callback_data=f'order:rescreen:{order_id}')],
     ])
+
+
+def groups_list_keyboard(rows):
+    keyboard = []
+    for r in rows:
+        title = str(r["title"] or r["chat_id"])[:28]
+        typ = r["type"] or "UNASSIGNED"
+        keyboard.append([InlineKeyboardButton(
+            text=f'⚙️ {title} → {typ}',
+            callback_data=f'group:choose:{r["chat_id"]}'
+        )])
+    keyboard.append([InlineKeyboardButton(text='🔧 Revérifier', callback_data='admin:repair')])
+    keyboard.append([InlineKeyboardButton(text='⬅️ Retour panel', callback_data='admin:panel')])
+    return InlineKeyboardMarkup(inline_keyboard=keyboard)
