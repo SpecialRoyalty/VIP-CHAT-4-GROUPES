@@ -339,7 +339,7 @@ async def cb_offer_next(c: CallbackQuery):
         return await c.answer(err, show_alert=True)
     total = svc.amount(sel)
     order_id = await db.create_order(c.from_user.id, list(sel), total)
-    await c.message.answer(f'💳 Montant mensuel : {total}€\n\nPayPal :\n{settings.paypal_link}\n\nAprès paiement, envoie ici une capture d’écran.\nCommande #{order_id}', reply_markup=kb.payment_wait_keyboard())
+    await c.message.answer(f'💳 Montant mensuel : {total}€\n\nPayPal (ENTRE AMIS UNIQUEMENT SI AUTRE= BAN)  :\n{settings.paypal_link}\n\nAprès paiement, envoie ici une capture d’écran.\nCommande #{order_id}', reply_markup=kb.payment_wait_keyboard())
     await c.answer()
 
 
