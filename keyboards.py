@@ -8,17 +8,14 @@ GROUP_TYPES = {
     'REDIFFUSION': '🔁 Rediffusion',
 }
 
-PRICES = {
-    'VIP_NON_TELECHARGEABLE': 8,
-    'VIP_TELECHARGEABLE': 10,
-    'REDIFFUSION': 10,
-}
+PRICES = {'VIP_NON_TELECHARGEABLE': 8, 'VIP_TELECHARGEABLE': 10, 'REDIFFUSION': 10}
 
 
-def admin_panel() -> InlineKeyboardMarkup:
+def admin_panel(pending_count: int = 0) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text='👥 Groupes', callback_data='admin:groups'), InlineKeyboardButton(text='ℹ️ Infos système', callback_data='admin:info')],
-        [InlineKeyboardButton(text='💳 Paiement PayPal', callback_data='admin:paypal'), InlineKeyboardButton(text='📦 Commandes', callback_data='admin:orders')],
+        [InlineKeyboardButton(text='💳 Paiement PayPal', callback_data='admin:paypal'), InlineKeyboardButton(text=f'📦 Suivi commandes ({pending_count})', callback_data='admin:orders')],
+        [InlineKeyboardButton(text='📒 Comptabilité', callback_data='admin:accounting'), InlineKeyboardButton(text='👤 Abonnements', callback_data='admin:subscriptions')],
         [InlineKeyboardButton(text='📢 Publicités', callback_data='admin:ads')],
     ])
 
@@ -54,8 +51,18 @@ def offer_keyboard(selection: set[str] | None = None) -> InlineKeyboardMarkup:
 
 def validate_keyboard(order_id: int) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text='✅ Valider', callback_data=f'order:approve:{order_id}'), InlineKeyboardButton(text='❌ Refuser / nouvelle capture', callback_data=f'order:reject:{order_id}')],
-        [InlineKeyboardButton(text='📸 Demander une nouvelle capture', callback_data=f'order:resend:{order_id}')]
+        [InlineKeyboardButton(text='✅ Valider', callback_data=f'order:approve:{order_id}'), InlineKeyboardButton(text='❌ Refuser', callback_data=f'order:reject_menu:{order_id}')],
+    ])
+
+
+def refusal_reasons_keyboard(order_id: int) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text='Référence introuvable', callback_data=f'order:reject_reason:{order_id}:REFERENCE_INTROUVABLE')],
+        [InlineKeyboardButton(text='Mauvais montant', callback_data=f'order:reject_reason:{order_id}:MAUVAIS_MONTANT')],
+        [InlineKeyboardButton(text='Capture illisible', callback_data=f'order:reject_reason:{order_id}:CAPTURE_ILLISIBLE')],
+        [InlineKeyboardButton(text='Paiement non reçu', callback_data=f'order:reject_reason:{order_id}:PAIEMENT_NON_RECU')],
+        [InlineKeyboardButton(text='Autre motif', callback_data=f'order:reject_reason:{order_id}:AUTRE')],
+        [InlineKeyboardButton(text='🔙 Retour commande', callback_data=f'order:view:{order_id}')],
     ])
 
 
@@ -63,7 +70,6 @@ def payment_wait_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text='❌ Annuler et changer d’offre', callback_data='order:cancel_current')]
     ])
-
 
 
 def ads_panel() -> InlineKeyboardMarkup:
@@ -91,5 +97,22 @@ def orders_panel(orders) -> InlineKeyboardMarkup:
     rows = []
     for o in orders:
         rows.append([InlineKeyboardButton(text=f"Commande #{o['id']} — {o['status']} — {o['amount']}€", callback_data=f"order:view:{o['id']}")])
+    rows.append([InlineKeyboardButton(text='🕐 À traiter', callback_data='orders:pending')])
+    rows.append([InlineKeyboardButton(text='✅ Validées', callback_data='orders:approved'), InlineKeyboardButton(text='❌ Refusées', callback_data='orders:rejected')])
     rows.append([InlineKeyboardButton(text='🔙 Retour', callback_data='admin:panel')])
     return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def accounting_panel() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text='🔍 Vérifier cohérence globale', callback_data='accounting:check')],
+        [InlineKeyboardButton(text='🔙 Retour', callback_data='admin:panel')],
+    ])
+
+
+def subscriptions_panel() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text='Actifs', callback_data='subs:active'), InlineKeyboardButton(text='Expirent bientôt', callback_data='subs:expiring')],
+        [InlineKeyboardButton(text='Expirés', callback_data='subs:expired')],
+        [InlineKeyboardButton(text='🔙 Retour', callback_data='admin:panel')],
+    ])
