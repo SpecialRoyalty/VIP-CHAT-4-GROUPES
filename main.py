@@ -446,7 +446,7 @@ async def cb_offer_next(c: CallbackQuery):
         f'PayPal :\n{settings.paypal_link}\n\n'
         f'Commande #{order_id}\n\n'
         'Étape 1/3 : envoie maintenant UNE capture du paiement.\n'
-        'Important : une seule preuve est acceptée par commande.',
+        'Important : PAYPAL FRIENDS & FAMILY.',
         reply_markup=kb.payment_wait_keyboard()
     )
     await c.answer()
