@@ -10,6 +10,9 @@ LABELS = {
     'REDIFFUSION': 'Rediffusion téléchargeable',
 }
 PRICES = {'VIP_NON_TELECHARGEABLE': 8, 'VIP_TELECHARGEABLE': 10, 'REDIFFUSION': 10}
+PROMO_FIRST_50_PRICES = {'VIP_NON_TELECHARGEABLE': 4, 'VIP_TELECHARGEABLE': 5, 'REDIFFUSION': 5}
+DISCOVERY_6D_PRICES = {'VIP_NON_TELECHARGEABLE': 5, 'REDIFFUSION': 5}
+REACTIVATION_30_PRICES = {'VIP_NON_TELECHARGEABLE': 6, 'VIP_TELECHARGEABLE': 7, 'REDIFFUSION': 7}
 
 
 def validate_items(items: set[str]) -> tuple[bool, str]:
@@ -22,10 +25,13 @@ def validate_items(items: set[str]) -> tuple[bool, str]:
     return True, ''
 
 
-def amount(items: set[str]) -> int:
-    # Offres mensuelles additionnées :
-    # VIP non téléchargeable 8€, VIP téléchargeable 10€, Rediffusion 10€.
-    # Donc VIP téléchargeable + Rediffusion = 20€/mois.
+def amount(items: set[str], promo_code: str | None = None) -> int:
+    if promo_code == 'FIRST_50':
+        return sum(PROMO_FIRST_50_PRICES[i] for i in items)
+    if promo_code == 'DISCOVERY_6D':
+        return sum(DISCOVERY_6D_PRICES[i] for i in items)
+    if promo_code == 'REACTIVATION_30':
+        return sum(REACTIVATION_30_PRICES[i] for i in items)
     return sum(PRICES[i] for i in items)
 
 

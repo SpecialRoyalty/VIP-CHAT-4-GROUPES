@@ -16,7 +16,7 @@ def admin_panel(pending_count: int = 0) -> InlineKeyboardMarkup:
         [InlineKeyboardButton(text='👥 Groupes', callback_data='admin:groups'), InlineKeyboardButton(text='ℹ️ Infos système', callback_data='admin:info')],
         [InlineKeyboardButton(text='💳 Paiement PayPal', callback_data='admin:paypal'), InlineKeyboardButton(text=f'📦 Suivi commandes ({pending_count})', callback_data='admin:orders')],
         [InlineKeyboardButton(text='📒 Comptabilité', callback_data='admin:accounting'), InlineKeyboardButton(text='👤 Abonnements', callback_data='admin:subscriptions')],
-        [InlineKeyboardButton(text='📢 Publicités', callback_data='admin:ads')],
+        [InlineKeyboardButton(text='📢 Publicités', callback_data='admin:ads'), InlineKeyboardButton(text='🎯 Campagnes promo', callback_data='admin:promos')],
     ])
 
 
@@ -38,14 +38,65 @@ def access_vip() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text='🔥 Accès VIP', url='https://t.me/PLACEHOLDER_BOT?start=vip')]])
 
 
-def offer_keyboard(selection: set[str] | None = None) -> InlineKeyboardMarkup:
+def offer_text(prefix: str = '') -> str:
+    return (
+        f"{prefix}Choisis ton accès :\n\n"
+        "🔒 VIP non téléchargeable — 8€/mois\n"
+        "• Accès au VIP principal\n"
+        "• Consultation dans Telegram\n"
+        "• Contenu ajouté régulièrement\n"
+        "• Téléchargement non inclus\n\n"
+        "⬇️ VIP téléchargeable — 10€/mois\n"
+        "• Accès au VIP principal\n"
+        "• Téléchargement autorisé\n"
+        "• Accès complet aux médias\n\n"
+        "🔁 Rediffusion — 10€/mois\n"
+        "• Médias rediffusés depuis les groupes sources\n"
+        "• Téléchargement autorisé\n"
+    )
+
+
+def offer_keyboard(selection: set[str] | None = None, promo: str | None = None) -> InlineKeyboardMarkup:
+    selection = selection or set()
+    def box(k): return '✅' if k in selection else '☐'
+    if promo == 'FIRST_50':
+        rows = [
+            [InlineKeyboardButton(text=f"{box('VIP_NON_TELECHARGEABLE')} VIP non téléchargeable — 4€/mois", callback_data='offer:toggle:VIP_NON_TELECHARGEABLE')],
+            [InlineKeyboardButton(text=f"{box('VIP_TELECHARGEABLE')} VIP téléchargeable — 5€/mois", callback_data='offer:toggle:VIP_TELECHARGEABLE')],
+            [InlineKeyboardButton(text=f"{box('REDIFFUSION')} Rediffusion — 5€/mois", callback_data='offer:toggle:REDIFFUSION')],
+        ]
+    else:
+        rows = [
+            [InlineKeyboardButton(text=f"{box('VIP_NON_TELECHARGEABLE')} VIP non téléchargeable — 8€/mois", callback_data='offer:toggle:VIP_NON_TELECHARGEABLE')],
+            [InlineKeyboardButton(text=f"{box('VIP_TELECHARGEABLE')} VIP téléchargeable — 10€/mois", callback_data='offer:toggle:VIP_TELECHARGEABLE')],
+            [InlineKeyboardButton(text=f"{box('REDIFFUSION')} Rediffusion — 10€/mois", callback_data='offer:toggle:REDIFFUSION')],
+        ]
+    rows.append([InlineKeyboardButton(text='➡️ Suivant', callback_data='offer:next')])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def discovery_offer_keyboard(selection: set[str] | None = None) -> InlineKeyboardMarkup:
     selection = selection or set()
     def box(k): return '✅' if k in selection else '☐'
     return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text=f"{box('VIP_NON_TELECHARGEABLE')} VIP non téléchargeable — 8€/mois", callback_data='offer:toggle:VIP_NON_TELECHARGEABLE')],
-        [InlineKeyboardButton(text=f"{box('VIP_TELECHARGEABLE')} VIP téléchargeable — 10€/mois", callback_data='offer:toggle:VIP_TELECHARGEABLE')],
-        [InlineKeyboardButton(text=f"{box('REDIFFUSION')} Rediffusion — 10€/mois", callback_data='offer:toggle:REDIFFUSION')],
-        [InlineKeyboardButton(text='➡️ Suivant', callback_data='offer:next')],
+        [InlineKeyboardButton(text=f"{box('VIP_NON_TELECHARGEABLE')} VIP non téléchargeable — 5€/6 jours", callback_data='offer6:toggle:VIP_NON_TELECHARGEABLE')],
+        [InlineKeyboardButton(text=f"{box('REDIFFUSION')} Rediffusion — 5€/6 jours", callback_data='offer6:toggle:REDIFFUSION')],
+        [InlineKeyboardButton(text='➡️ Suivant', callback_data='offer6:next')],
+    ])
+
+
+def second_demo_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text='Accéder à la démo', callback_data='demo:second')]])
+
+
+def promo_panel(enabled_50: bool, enabled_2plus1: bool, enabled_reactivation: bool) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text=f"{'🟢 ON' if enabled_50 else '⚪ OFF'} -50% premiers entrants", callback_data='promo:toggle:FIRST_50')],
+        [InlineKeyboardButton(text=f"{'🟢 ON' if enabled_2plus1 else '⚪ OFF'} 2 mois achetés = 1 mois offert", callback_data='promo:toggle:FIRST_2PLUS1')],
+        [InlineKeyboardButton(text=f"{'🟢 ON' if enabled_reactivation else '⚪ OFF'} Relance anciens -30%", callback_data='promo:toggle:REACTIVATION_30')],
+        [InlineKeyboardButton(text='🔍 Scanner les anciens utilisateurs', callback_data='promo:scan_old_users')],
+        [InlineKeyboardButton(text='📣 Envoyer relance anciens maintenant', callback_data='promo:send_reactivation')],
+        [InlineKeyboardButton(text='🔙 Retour', callback_data='admin:panel')],
     ])
 
 

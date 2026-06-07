@@ -41,3 +41,18 @@ TIMEZONE=Europe/Paris
 Le bot doit être admin dans les groupes VIP avec les droits :
 - créer/inviter via des liens,
 - bannir/restreindre des membres.
+
+## Mise à jour marketing / promotions
+
+Cette version ajoute, sans supprimer les anciennes données :
+
+- Texte explicatif au-dessus des offres mensuelles.
+- Deuxième relance démo après 5 jours si la personne n'a jamais payé.
+- Offre découverte 6 jours envoyée 2 jours après la relance démo, valable 24h et une seule fois.
+- Bouton admin `🎯 Campagnes promo` avec ON/OFF :
+  - `-50% premiers entrants` : 4€/mois, 5€/mois, 5€/mois pour les nouveaux prospects éligibles.
+  - `2 mois achetés = 1 mois offert` : le client paie bien 2 mois et reçoit 3 mois d'accès.
+  - `Relance anciens -30%` : anciens abonnés expirés depuis au moins 10 jours, valable 24h.
+- Aucun client ayant déjà payé au moins une fois ne reçoit les promos nouveaux prospects.
+
+Les migrations sont additives : nouvelles colonnes dans `users` et `orders`, aucun DROP.

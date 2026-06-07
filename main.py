@@ -51,7 +51,9 @@ def format_order_text(order, username: str | None = None) -> str:
         f"Utilisateur : {who}\n"
         f"ID : {order['user_id']}\n"
         f"Choix : {svc.item_text(order['items'])}\n"
-        f"Montant : {order['amount']}€/mois\n"
+        f"Montant : {order['amount']}€\n"
+        f"Promo : {order['promo_code'] or '—'}\n"
+        f"Durée : {order['duration_days'] or 30} jours\n"
         f"Email PayPal : {order['paypal_email'] or '—'}\n"
         f"Référence PayPal : {order['paypal_reference'] or '—'}\n"
         f"Statut : {order['status']}"
@@ -128,7 +130,15 @@ async def detect_group_message(message: Message):
 async def give_demo(message: Message):
     user_id = message.from_user.id
     if await db.has_demo_used(user_id):
-        await message.answer('Tu as déjà utilisé ta démo. Voici les offres mensuelles :', reply_markup=kb.offer_keyboard())
+        promo = None
+        if await db.discovery_offer_active(user_id): promo = 'DISCOVERY_6D'
+        elif await db.reactivation_offer_active(user_id): promo = 'REACTIVATION_30'
+        elif await db.first_promo_active_for_user(user_id): promo = 'FIRST_50'
+        if promo == 'DISCOVERY_6D':
+            await message.answer('Voici ton offre découverte valable 24h :', reply_markup=kb.discovery_offer_keyboard())
+        else:
+            prefix = '🎁 Offre spéciale active.\n\n' if promo else ''
+            await message.answer(kb.offer_text(prefix), reply_markup=kb.offer_keyboard(promo=promo))
         return
     gs = await db.group_by_type('VIP_PREVIEW')
     if not gs:
@@ -136,8 +146,11 @@ async def give_demo(message: Message):
         await notify_admins('❌ VIP_PREVIEW non configuré : impossible de donner une démo.')
         return
     try:
+        first_50 = ((await db.get_setting('promo_FIRST_50', 'OFF')) == 'ON' or (await db.get_setting('promo_FIRST_2PLUS1', 'OFF')) == 'ON') and await db.eligible_first_promo(user_id)
         link = await svc.create_unique_invite(bot, gs[0]['chat_id'], settings.invite_expire_minutes)
         await db.create_demo(user_id, gs[0]['chat_id'], link)
+        if first_50:
+            await db.mark_first_promo_sent(user_id)
         await message.answer('✅ Voici ton accès démo unique :\n' + link)
     except Exception as e:
         await message.answer('Erreur lors de la création du lien démo. Un admin a été prévenu.')
@@ -325,6 +338,104 @@ async def cb_ad_send_selected(c: CallbackQuery):
     await c.message.answer(f'📢 Publicité envoyée dans {sent}/{len(selected)} groupe(s).')
     await c.answer()
 
+
+@r.callback_query(F.data == 'admin:promos')
+async def cb_promos(c: CallbackQuery):
+    if not is_admin(c.from_user.id): return await c.answer()
+    e50 = (await db.get_setting('promo_FIRST_50', 'OFF')) == 'ON'
+    e2 = (await db.get_setting('promo_FIRST_2PLUS1', 'OFF')) == 'ON'
+    er = (await db.get_setting('promo_REACTIVATION_30', 'OFF')) == 'ON'
+    await c.message.edit_text(
+        '🎯 Campagnes promo\n\n'
+        '- -50% : uniquement les nouveaux prospects qui n’ont jamais payé.\n'
+        '- 2 mois achetés = 1 mois offert : le client paie bien 2 mois, puis reçoit 3 mois d’accès.\n'
+        '- Relance anciens -30% : anciens abonnés expirés depuis 10 jours minimum, offre valable 24h.',
+        reply_markup=kb.promo_panel(e50, e2, er)
+    )
+    await c.answer()
+
+@r.callback_query(F.data.startswith('promo:toggle:'))
+async def cb_promo_toggle(c: CallbackQuery):
+    if not is_admin(c.from_user.id): return await c.answer()
+    code = c.data.split(':')[2]
+    key = f'promo_{code}'
+    current = await db.get_setting(key, 'OFF')
+    await db.set_setting(key, 'OFF' if current == 'ON' else 'ON')
+    await cb_promos(c)
+
+@r.callback_query(F.data == 'promo:send_reactivation')
+async def cb_send_reactivation(c: CallbackQuery):
+    if not is_admin(c.from_user.id): return await c.answer()
+    if (await db.get_setting('promo_REACTIVATION_30', 'OFF')) != 'ON':
+        return await c.answer('Active d’abord le bouton Relance anciens -30%.', show_alert=True)
+    sent = 0
+    for u in await db.reactivation_candidates():
+        ok = await svc.safe_send(bot, u['user_id'], '🎁 Offre retour VIP\n\nDu nouveau contenu a été ajouté. Profite de -30% pour revenir.\n\nOffre valable 24h.', reply_markup=kb.offer_keyboard(promo='REACTIVATION_30'))
+        if ok:
+            await db.mark_reactivation_offer_sent(u['user_id'])
+            sent += 1
+    await c.message.answer(f'📣 Relance anciens envoyée à {sent} personne(s).')
+    await c.answer()
+
+@r.callback_query(F.data == 'promo:scan_old_users')
+async def cb_scan_old_users(c: CallbackQuery):
+    if not is_admin(c.from_user.id): return await c.answer()
+    await c.answer('Scan lancé…')
+    stats = await marketing_followups()
+    await c.message.answer(
+        '🔍 Scan anciens utilisateurs terminé.\n\n'
+        f"Deuxième chance envoyée : {stats.get('second_demo_sent', 0)}\n"
+        f"Offres découverte 6 jours envoyées : {stats.get('discovery_sent', 0)}\n"
+        '\nLes clients ayant déjà payé sont exclus automatiquement.'
+    )
+
+@r.callback_query(F.data == 'demo:second')
+async def cb_second_demo(c: CallbackQuery):
+    await db.upsert_user(c.from_user)
+    if not await db.can_use_second_demo(c.from_user.id):
+        return await c.answer('Cette invitation n’est plus disponible.', show_alert=True)
+    gs = await db.group_by_type('VIP_PREVIEW')
+    if not gs:
+        await notify_admins('❌ VIP_PREVIEW non configuré : impossible de donner une deuxième démo.')
+        return await c.answer('Démo temporairement indisponible.', show_alert=True)
+    try:
+        link = await svc.create_unique_invite(bot, gs[0]['chat_id'], settings.invite_expire_minutes)
+        await db.create_demo(c.from_user.id, gs[0]['chat_id'], link)
+        await db.mark_second_demo_used(c.from_user.id)
+        await c.message.answer('✅ Voici ton nouvel accès démo unique :\n' + link)
+    except Exception as e:
+        await notify_admins(f'❌ Erreur deuxième lien démo : {e}')
+        await c.message.answer('Erreur lors de la création du lien démo. Un admin a été prévenu.')
+    await c.answer()
+
+@r.callback_query(F.data.startswith('offer6:toggle:'))
+async def cb_offer6_toggle(c: CallbackQuery):
+    item = c.data.split(':')[2]
+    if item not in {'VIP_NON_TELECHARGEABLE','REDIFFUSION'}:
+        return await c.answer('Choix invalide.', show_alert=True)
+    sel = user_selection.setdefault(c.from_user.id, set())
+    if item in sel: sel.remove(item)
+    else: sel.add(item)
+    try:
+        await c.message.edit_reply_markup(reply_markup=kb.discovery_offer_keyboard(sel))
+    except Exception as e:
+        if 'message is not modified' not in str(e): raise
+    await c.answer()
+
+@r.callback_query(F.data == 'offer6:next')
+async def cb_offer6_next(c: CallbackQuery):
+    await db.upsert_user(c.from_user)
+    if not await db.discovery_offer_active(c.from_user.id):
+        return await c.answer('Cette offre est expirée.', show_alert=True)
+    sel = user_selection.get(c.from_user.id, set())
+    if not sel or not sel <= {'VIP_NON_TELECHARGEABLE','REDIFFUSION'}:
+        return await c.answer('Choisis au moins une offre découverte.', show_alert=True)
+    total = svc.amount(sel, 'DISCOVERY_6D')
+    order_id = await db.create_order(c.from_user.id, list(sel), total, promo_code='DISCOVERY_6D', duration_days=6)
+    await db.mark_discovery_offer_used(c.from_user.id)
+    await c.message.answer(f'💳 Montant offre découverte : {total}€ / 6 jours\n\nPayPal :\n{settings.paypal_link}\n\nCommande #{order_id}\n\nÉtape 1/3 : envoie maintenant UNE capture du paiement.', reply_markup=kb.payment_wait_keyboard())
+    await c.answer()
+
 @r.callback_query(F.data == 'admin:orders')
 async def cb_orders(c: CallbackQuery):
     if not is_admin(c.from_user.id): return await c.answer()
@@ -425,8 +536,11 @@ async def cb_offer_toggle(c: CallbackQuery):
         if item == 'VIP_NON_TELECHARGEABLE': sel.discard('VIP_TELECHARGEABLE')
         if item == 'VIP_TELECHARGEABLE': sel.discard('VIP_NON_TELECHARGEABLE')
         sel.add(item)
+    promo = None
+    if await db.reactivation_offer_active(c.from_user.id): promo = 'REACTIVATION_30'
+    elif await db.first_promo_active_for_user(c.from_user.id) and (await db.get_setting('promo_FIRST_50', 'OFF')) == 'ON': promo = 'FIRST_50'
     try:
-        await c.message.edit_reply_markup(reply_markup=kb.offer_keyboard(sel))
+        await c.message.edit_reply_markup(reply_markup=kb.offer_keyboard(sel, promo=promo))
     except Exception as e:
         if 'message is not modified' not in str(e):
             raise
@@ -439,14 +553,34 @@ async def cb_offer_next(c: CallbackQuery):
     ok, err = svc.validate_items(sel)
     if not ok:
         return await c.answer(err, show_alert=True)
-    total = svc.amount(sel)
-    order_id = await db.create_order(c.from_user.id, list(sel), total)
+    promo_code = None
+    duration_days = settings.subscription_days
+    label = 'mensuel'
+    if await db.reactivation_offer_active(c.from_user.id):
+        promo_code = 'REACTIVATION_30'
+        label = 'offre retour -30%'
+        await db.mark_reactivation_offer_used(c.from_user.id)
+    elif await db.first_promo_active_for_user(c.from_user.id):
+        if (await db.get_setting('promo_FIRST_2PLUS1', 'OFF')) == 'ON' and (await db.get_setting('promo_FIRST_50', 'OFF')) != 'ON':
+            promo_code = 'FIRST_2PLUS1'
+            duration_days = settings.subscription_days * 3
+            total = svc.amount(sel) * 2
+            await db.mark_first_promo_used(c.from_user.id)
+        elif (await db.get_setting('promo_FIRST_50', 'OFF')) == 'ON':
+            promo_code = 'FIRST_50'
+            await db.mark_first_promo_used(c.from_user.id)
+    if promo_code == 'FIRST_2PLUS1':
+        label = '2 mois achetés = 1 mois offert'
+    total = total if promo_code == 'FIRST_2PLUS1' else svc.amount(sel, promo_code)
+    order_id = await db.create_order(c.from_user.id, list(sel), total, promo_code=promo_code, duration_days=duration_days)
+    duration_txt = '3 mois' if promo_code == 'FIRST_2PLUS1' else ('6 jours' if promo_code == 'DISCOVERY_6D' else f'{duration_days} jours')
     await c.message.answer(
-        f'💳 Montant mensuel : {total}€/mois\n\n'
+        f'💳 Montant ({label}) : {total}€\n'
+        f'Durée d’accès après validation : {duration_txt}\n\n'
         f'PayPal :\n{settings.paypal_link}\n\n'
         f'Commande #{order_id}\n\n'
         'Étape 1/3 : envoie maintenant UNE capture du paiement.\n'
-        'Important : PAYPAL FRIENDS & FAMILY.',
+        'Important : une seule preuve est acceptée par commande.',
         reply_markup=kb.payment_wait_keyboard()
     )
     await c.answer()
@@ -564,7 +698,7 @@ async def cb_approve(c: CallbackQuery):
     old_items = set(old_sub['items']) if old_sub else set()
     new_items = set(order['items'])
     removed_items = list(old_items - new_items)
-    await db.activate_subscription(order['user_id'], list(order['items']), order_id, settings.subscription_days)
+    await db.activate_subscription(order['user_id'], list(order['items']), order_id, int(order['duration_days'] or settings.subscription_days))
     if removed_items:
         await svc.kick_user_from_groups(bot, order['user_id'], removed_items)
     try:
@@ -595,7 +729,7 @@ async def kick_expired_demos():
                     await db.log('WARNING', f'Revocation lien demo impossible user={user_id}: {revoke_error}')
             await db.mark_demo_kicked(user_id)
             await db.log('INFO', f'Kick demo réussi user={user_id} group={chat_id}')
-            await svc.safe_send(bot, user_id, '⏱️ Ta démo est terminée. Tu peux maintenant choisir ton accès mensuel.', reply_markup=kb.offer_keyboard())
+            await svc.safe_send(bot, user_id, kb.offer_text('⏱️ Ta démo est terminée.\n\n'), reply_markup=kb.offer_keyboard())
         except Exception as e:
             failed_demo = await db.mark_demo_kick_failed(user_id, str(e))
             attempts = failed_demo['kick_attempts'] if failed_demo and 'kick_attempts' in failed_demo else 1
@@ -603,6 +737,23 @@ async def kick_expired_demos():
             if attempts == 1 or attempts % 5 == 0:
                 await db.mark_demo_kick_alerted(user_id)
                 await notify_admins(f'🚨 Échec expulsion démo\n\nUtilisateur ID : {user_id}\nGroupe Preview ID : {chat_id}\nTentative : {attempts}\n\nErreur Telegram : {e}')
+
+
+async def marketing_followups():
+    stats = {'second_demo_sent': 0, 'discovery_sent': 0}
+    # J+5 après la première démo, jamais payé : proposer une deuxième visite sans annoncer la durée.
+    for u in await db.second_demo_candidates():
+        ok = await svc.safe_send(bot, u['user_id'], "Tu n'as pas été convaincu ?\n\nNous t'offrons une nouvelle visite.", reply_markup=kb.second_demo_keyboard())
+        if ok:
+            await db.mark_second_demo_sent(u['user_id'])
+            stats['second_demo_sent'] += 1
+    # 2 jours plus tard, toujours pas payé : offre découverte 6 jours, valable 24h, une seule fois.
+    for u in await db.discovery_offer_candidates():
+        ok = await svc.safe_send(bot, u['user_id'], '🎁 Offre découverte valable 24h :\n\nVIP non téléchargeable — 5€ / 6 jours\nRediffusion — 5€ / 6 jours', reply_markup=kb.discovery_offer_keyboard())
+        if ok:
+            await db.mark_discovery_offer_sent(u['user_id'])
+            stats['discovery_sent'] += 1
+    return stats
 
 async def monthly_reminders_and_expiry():
     for days in (10, 5, 3):
@@ -622,6 +773,7 @@ async def main():
     scheduler = AsyncIOScheduler(timezone=settings.timezone)
     scheduler.add_job(kick_expired_demos, 'interval', minutes=1, id='kick_demos', replace_existing=True)
     scheduler.add_job(monthly_reminders_and_expiry, 'interval', hours=6, id='monthly', replace_existing=True)
+    scheduler.add_job(marketing_followups, 'interval', hours=6, id='marketing_followups', replace_existing=True)
     scheduler.start()
     await notify_admins('✅ Bot démarré sur Railway.')
     await dp.start_polling(bot)

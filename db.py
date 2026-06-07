@@ -37,6 +37,8 @@ CREATE TABLE IF NOT EXISTS orders (
   items TEXT[] NOT NULL,
   amount INTEGER NOT NULL,
   status TEXT NOT NULL DEFAULT 'WAITING_SCREEN',
+  promo_code TEXT,
+  duration_days INTEGER NOT NULL DEFAULT 30,
   screenshot_file_id TEXT,
   created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
   decided_at TIMESTAMPTZ,
@@ -80,10 +82,23 @@ ALTER TABLE orders ADD COLUMN IF NOT EXISTS processed_by_admin_id BIGINT;
 ALTER TABLE orders ADD COLUMN IF NOT EXISTS processed_by_admin_username TEXT;
 ALTER TABLE orders ADD COLUMN IF NOT EXISTS processed_at TIMESTAMPTZ;
 ALTER TABLE orders ADD COLUMN IF NOT EXISTS refusal_reason TEXT;
+ALTER TABLE orders ADD COLUMN IF NOT EXISTS promo_code TEXT;
+ALTER TABLE orders ADD COLUMN IF NOT EXISTS duration_days INTEGER NOT NULL DEFAULT 30;
 
 ALTER TABLE subscriptions ADD COLUMN IF NOT EXISTS renewal_count INTEGER NOT NULL DEFAULT 0;
 ALTER TABLE subscriptions ADD COLUMN IF NOT EXISTS last_renewed_at TIMESTAMPTZ;
 ALTER TABLE subscriptions ADD COLUMN IF NOT EXISTS ended_at TIMESTAMPTZ;
+
+ALTER TABLE users ADD COLUMN IF NOT EXISTS second_demo_sent_at TIMESTAMPTZ;
+ALTER TABLE users ADD COLUMN IF NOT EXISTS second_demo_used_at TIMESTAMPTZ;
+ALTER TABLE users ADD COLUMN IF NOT EXISTS discovery_offer_sent_at TIMESTAMPTZ;
+ALTER TABLE users ADD COLUMN IF NOT EXISTS discovery_offer_expires_at TIMESTAMPTZ;
+ALTER TABLE users ADD COLUMN IF NOT EXISTS discovery_offer_used_at TIMESTAMPTZ;
+ALTER TABLE users ADD COLUMN IF NOT EXISTS first_promo_sent_at TIMESTAMPTZ;
+ALTER TABLE users ADD COLUMN IF NOT EXISTS first_promo_used_at TIMESTAMPTZ;
+ALTER TABLE users ADD COLUMN IF NOT EXISTS reactivation_offer_sent_at TIMESTAMPTZ;
+ALTER TABLE users ADD COLUMN IF NOT EXISTS reactivation_offer_expires_at TIMESTAMPTZ;
+ALTER TABLE users ADD COLUMN IF NOT EXISTS reactivation_offer_used_at TIMESTAMPTZ;
 
 CREATE TABLE IF NOT EXISTS admin_notifications (
   id BIGSERIAL PRIMARY KEY,
@@ -207,12 +222,12 @@ async def demo_for_user(user_id: int):
 
 OPEN_STATUSES = ('WAITING_SCREEN','WAITING_PAYPAL_EMAIL','WAITING_PAYPAL_REFERENCE','WAITING_ADMIN')
 
-async def create_order(user_id: int, items: list[str], amount: int) -> int:
+async def create_order(user_id: int, items: list[str], amount: int, promo_code: str | None = None, duration_days: int = 30) -> int:
     async with pool().acquire() as con:
         existing = await con.fetchval("SELECT id FROM orders WHERE user_id=$1 AND status = ANY($2::text[])", user_id, list(OPEN_STATUSES))
         if existing:
             return existing
-        return await con.fetchval('INSERT INTO orders(user_id,items,amount,status) VALUES($1,$2,$3,\'WAITING_SCREEN\') RETURNING id', user_id, items, amount)
+        return await con.fetchval('INSERT INTO orders(user_id,items,amount,status,promo_code,duration_days) VALUES($1,$2,$3,\'WAITING_SCREEN\',$4,$5) RETURNING id', user_id, items, amount, promo_code, duration_days)
 
 async def current_open_order(user_id: int):
     async with pool().acquire() as con:
@@ -395,3 +410,104 @@ async def subscriptions_list(filter_name: str = 'active', limit: int = 20):
         where = "expires_at <= now()"
     async with pool().acquire() as con:
         return await con.fetch(f'''SELECT s.*, u.username, u.first_name FROM subscriptions s LEFT JOIN users u ON u.user_id=s.user_id WHERE {where} ORDER BY expires_at ASC LIMIT $1''', limit)
+
+
+async def approved_order_count(user_id: int) -> int:
+    async with pool().acquire() as con:
+        return int(await con.fetchval("SELECT COUNT(*) FROM orders WHERE user_id=$1 AND status='APPROVED'", user_id) or 0)
+
+async def mark_first_promo_sent(user_id: int):
+    async with pool().acquire() as con:
+        await con.execute('UPDATE users SET first_promo_sent_at=COALESCE(first_promo_sent_at, now()) WHERE user_id=$1', user_id)
+
+async def first_promo_active_for_user(user_id: int) -> bool:
+    async with pool().acquire() as con:
+        row = await con.fetchrow('SELECT first_promo_sent_at, first_promo_used_at FROM users WHERE user_id=$1', user_id)
+        paid = int(await con.fetchval("SELECT COUNT(*) FROM orders WHERE user_id=$1 AND status='APPROVED'", user_id) or 0)
+        return bool(row and row['first_promo_sent_at'] and not row['first_promo_used_at'] and not paid)
+
+async def eligible_first_promo(user_id: int) -> bool:
+    async with pool().acquire() as con:
+        paid = int(await con.fetchval("SELECT COUNT(*) FROM orders WHERE user_id=$1 AND status='APPROVED'", user_id) or 0)
+        if paid:
+            return False
+        row = await con.fetchrow('SELECT demo_used, first_promo_used_at FROM users WHERE user_id=$1', user_id)
+        return bool(row and not row['demo_used'] and row['first_promo_used_at'] is None)
+
+async def mark_first_promo_used(user_id: int):
+    async with pool().acquire() as con:
+        await con.execute('UPDATE users SET first_promo_used_at=COALESCE(first_promo_used_at, now()) WHERE user_id=$1', user_id)
+
+async def mark_second_demo_sent(user_id: int):
+    async with pool().acquire() as con:
+        await con.execute('UPDATE users SET second_demo_sent_at=now() WHERE user_id=$1', user_id)
+
+async def mark_second_demo_used(user_id: int):
+    async with pool().acquire() as con:
+        await con.execute('UPDATE users SET second_demo_used_at=now() WHERE user_id=$1', user_id)
+
+async def can_use_second_demo(user_id: int) -> bool:
+    async with pool().acquire() as con:
+        row = await con.fetchrow('SELECT second_demo_sent_at, second_demo_used_at FROM users WHERE user_id=$1', user_id)
+        paid = int(await con.fetchval("SELECT COUNT(*) FROM orders WHERE user_id=$1 AND status='APPROVED'", user_id) or 0)
+        return bool(row and row['second_demo_sent_at'] and not row['second_demo_used_at'] and not paid)
+
+async def second_demo_candidates():
+    async with pool().acquire() as con:
+        return await con.fetch("""
+            SELECT u.* FROM users u
+            JOIN demos d ON d.user_id=u.user_id
+            WHERE u.demo_used=true
+              AND u.second_demo_sent_at IS NULL
+              AND NOT EXISTS (SELECT 1 FROM orders o WHERE o.user_id=u.user_id AND o.status='APPROVED')
+              AND COALESCE(d.joined_at, d.created_at) <= now() - interval '5 days'
+        """)
+
+async def discovery_offer_candidates():
+    async with pool().acquire() as con:
+        return await con.fetch("""
+            SELECT u.* FROM users u
+            WHERE u.second_demo_sent_at IS NOT NULL
+              AND u.discovery_offer_sent_at IS NULL
+              AND NOT EXISTS (SELECT 1 FROM orders o WHERE o.user_id=u.user_id AND o.status='APPROVED')
+              AND u.second_demo_sent_at <= now() - interval '2 days'
+        """)
+
+async def mark_discovery_offer_sent(user_id: int):
+    async with pool().acquire() as con:
+        await con.execute("UPDATE users SET discovery_offer_sent_at=now(), discovery_offer_expires_at=now()+interval '24 hours' WHERE user_id=$1", user_id)
+
+async def discovery_offer_active(user_id: int) -> bool:
+    async with pool().acquire() as con:
+        row = await con.fetchrow('SELECT discovery_offer_expires_at, discovery_offer_used_at FROM users WHERE user_id=$1', user_id)
+        paid = int(await con.fetchval("SELECT COUNT(*) FROM orders WHERE user_id=$1 AND status='APPROVED'", user_id) or 0)
+        return bool(row and row['discovery_offer_expires_at'] and row['discovery_offer_expires_at'] > datetime.now(timezone.utc) and not row['discovery_offer_used_at'] and not paid)
+
+async def mark_discovery_offer_used(user_id: int):
+    async with pool().acquire() as con:
+        await con.execute('UPDATE users SET discovery_offer_used_at=COALESCE(discovery_offer_used_at, now()) WHERE user_id=$1', user_id)
+
+async def reactivation_candidates():
+    async with pool().acquire() as con:
+        return await con.fetch("""
+            SELECT DISTINCT u.user_id, u.username, u.first_name
+            FROM users u
+            JOIN subscriptions s ON s.user_id=u.user_id
+            WHERE s.active=false
+              AND s.ended_at <= now() - interval '10 days'
+              AND u.reactivation_offer_sent_at IS NULL
+              AND NOT EXISTS (SELECT 1 FROM subscriptions s2 WHERE s2.user_id=u.user_id AND s2.active=true)
+        """)
+
+async def mark_reactivation_offer_sent(user_id: int):
+    async with pool().acquire() as con:
+        await con.execute("UPDATE users SET reactivation_offer_sent_at=now(), reactivation_offer_expires_at=now()+interval '24 hours' WHERE user_id=$1", user_id)
+
+async def reactivation_offer_active(user_id: int) -> bool:
+    async with pool().acquire() as con:
+        row = await con.fetchrow('SELECT reactivation_offer_expires_at, reactivation_offer_used_at FROM users WHERE user_id=$1', user_id)
+        return bool(row and row['reactivation_offer_expires_at'] and row['reactivation_offer_expires_at'] > datetime.now(timezone.utc) and not row['reactivation_offer_used_at'])
+
+async def mark_reactivation_offer_used(user_id: int):
+    async with pool().acquire() as con:
+        await con.execute('UPDATE users SET reactivation_offer_used_at=COALESCE(reactivation_offer_used_at, now()) WHERE user_id=$1', user_id)
