@@ -51,7 +51,7 @@ def offer_text(prefix: str = '') -> str:
         "• Téléchargement autorisé\n"
         "• Accès complet aux médias\n\n"
         "🔁 Rediffusion — 10€/mois\n"
-        "• Médias rediffusés depuis les groupes sources\n"
+        "• Médias rediffusés depuis les groupes : JAVANA + LA SAVONETTE + CHAT + FNISSEUR....\n"
         "• Téléchargement autorisé\n"
     )
 
