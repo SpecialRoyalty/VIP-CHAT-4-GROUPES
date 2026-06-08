@@ -53,8 +53,8 @@ def offer_text(prefix: str = '') -> str:
         "• Téléchargement autorisé\n"
         "• Accès complet aux médias\n\n"
         f"🔁 Rediffusion — {svc.eur(p['REDIFFUSION'])}/mois\n"
-        "• Médias rediffusés depuis les groupes sources\n"
-        "• Téléchargement autorisé\n"
+        "• Médias téléchargé avec nos méthodes depuis les groupes JAVANA FINISSEURS SAVONETTE tous les jours \n"
+        "• Téléchargement partiel autorisé\n"
     )
 
 def offer_keyboard(selection: set[str] | None = None, promo: str | None = None) -> InlineKeyboardMarkup:
