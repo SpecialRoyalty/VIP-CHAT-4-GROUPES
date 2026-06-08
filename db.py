@@ -84,6 +84,7 @@ ALTER TABLE orders ADD COLUMN IF NOT EXISTS processed_at TIMESTAMPTZ;
 ALTER TABLE orders ADD COLUMN IF NOT EXISTS refusal_reason TEXT;
 ALTER TABLE orders ADD COLUMN IF NOT EXISTS promo_code TEXT;
 ALTER TABLE orders ADD COLUMN IF NOT EXISTS duration_days INTEGER NOT NULL DEFAULT 30;
+ALTER TABLE orders ALTER COLUMN amount TYPE NUMERIC(10,2) USING amount::numeric;
 
 ALTER TABLE subscriptions ADD COLUMN IF NOT EXISTS renewal_count INTEGER NOT NULL DEFAULT 0;
 ALTER TABLE subscriptions ADD COLUMN IF NOT EXISTS last_renewed_at TIMESTAMPTZ;
@@ -121,6 +122,20 @@ CREATE TABLE IF NOT EXISTS admin_actions (
   details TEXT,
   created_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
+
+-- Tarification dynamique : valeurs par défaut si absentes.
+INSERT INTO settings(key,value) VALUES
+ ('price_VIP_NON_TELECHARGEABLE','10'),
+ ('price_VIP_TELECHARGEABLE','16'),
+ ('price_REDIFFUSION','15'),
+ ('discount_FIRST_50','50'),
+ ('discount_DISCOVERY_6D','50'),
+ ('discount_REACTIVATION_30','30'),
+ ('promo_FIRST_50','OFF'),
+ ('promo_FIRST_2PLUS1','OFF'),
+ ('promo_REACTIVATION_30','OFF')
+ON CONFLICT(key) DO NOTHING;
+
 '''
 
 _pool: asyncpg.Pool | None = None
@@ -222,7 +237,7 @@ async def demo_for_user(user_id: int):
 
 OPEN_STATUSES = ('WAITING_SCREEN','WAITING_PAYPAL_EMAIL','WAITING_PAYPAL_REFERENCE','WAITING_ADMIN')
 
-async def create_order(user_id: int, items: list[str], amount: int, promo_code: str | None = None, duration_days: int = 30) -> int:
+async def create_order(user_id: int, items: list[str], amount, promo_code: str | None = None, duration_days: int = 30) -> int:
     async with pool().acquire() as con:
         existing = await con.fetchval("SELECT id FROM orders WHERE user_id=$1 AND status = ANY($2::text[])", user_id, list(OPEN_STATUSES))
         if existing:
@@ -358,6 +373,30 @@ async def set_setting(key: str, value: str):
     async with pool().acquire() as con:
         await con.execute('INSERT INTO settings(key,value) VALUES($1,$2) ON CONFLICT(key) DO UPDATE SET value=$2', key, value)
 
+
+PRICE_KEYS = ['VIP_NON_TELECHARGEABLE','VIP_TELECHARGEABLE','REDIFFUSION']
+DEFAULT_PRICING = {
+    'price_VIP_NON_TELECHARGEABLE': '10',
+    'price_VIP_TELECHARGEABLE': '16',
+    'price_REDIFFUSION': '15',
+    'discount_FIRST_50': '50',
+    'discount_DISCOVERY_6D': '50',
+    'discount_REACTIVATION_30': '30',
+}
+
+async def pricing_settings():
+    async with pool().acquire() as con:
+        rows = await con.fetch("SELECT key,value FROM settings WHERE key LIKE 'price_%' OR key LIKE 'discount_%'")
+        data = dict(DEFAULT_PRICING)
+        data.update({r['key']: r['value'] for r in rows})
+        return data
+
+async def set_pricing_value(key: str, value: str):
+    if not (key.startswith('price_') or key.startswith('discount_')):
+        raise ValueError('Clé tarification invalide')
+    async with pool().acquire() as con:
+        await con.execute('INSERT INTO settings(key,value) VALUES($1,$2) ON CONFLICT(key) DO UPDATE SET value=$2', key, value)
+
 async def recent_orders(limit: int = 10):
     async with pool().acquire() as con:
         return await con.fetch('SELECT * FROM orders ORDER BY created_at DESC LIMIT $1', limit)
@@ -369,9 +408,9 @@ async def orders_by_status(status: str, limit: int = 20):
 async def accounting_summary():
     async with pool().acquire() as con:
         return {
-            'total_amount': int(await con.fetchval("SELECT COALESCE(SUM(amount),0) FROM orders WHERE status='APPROVED'") or 0),
-            'today_amount': int(await con.fetchval("SELECT COALESCE(SUM(amount),0) FROM orders WHERE status='APPROVED' AND processed_at::date = now()::date") or 0),
-            'month_amount': int(await con.fetchval("SELECT COALESCE(SUM(amount),0) FROM orders WHERE status='APPROVED' AND date_trunc('month', processed_at)=date_trunc('month', now())") or 0),
+            'total_amount': await con.fetchval("SELECT COALESCE(SUM(amount),0) FROM orders WHERE status='APPROVED'") or 0,
+            'today_amount': await con.fetchval("SELECT COALESCE(SUM(amount),0) FROM orders WHERE status='APPROVED' AND processed_at::date = now()::date") or 0,
+            'month_amount': await con.fetchval("SELECT COALESCE(SUM(amount),0) FROM orders WHERE status='APPROVED' AND date_trunc('month', processed_at)=date_trunc('month', now())") or 0,
             'approved': int(await con.fetchval("SELECT COUNT(*) FROM orders WHERE status='APPROVED'") or 0),
             'rejected': int(await con.fetchval("SELECT COUNT(*) FROM orders WHERE status='REJECTED'") or 0),
             'pending': int(await con.fetchval("SELECT COUNT(*) FROM orders WHERE status='WAITING_ADMIN'") or 0),
@@ -389,15 +428,8 @@ async def accounting_anomalies():
             SELECT o.id FROM orders o LEFT JOIN subscriptions s ON s.order_id=o.id
             WHERE o.status='APPROVED' AND s.id IS NULL ORDER BY o.id DESC LIMIT 10
         """)]
-        rows += [f"Commande #{r['id']} montant {r['amount']}€ attendu {r['expected']}€" for r in await con.fetch("""
-            SELECT id, amount,
-              (CASE WHEN 'VIP_NON_TELECHARGEABLE'=ANY(items) THEN 8 ELSE 0 END +
-               CASE WHEN 'VIP_TELECHARGEABLE'=ANY(items) THEN 10 ELSE 0 END +
-               CASE WHEN 'REDIFFUSION'=ANY(items) THEN 10 ELSE 0 END) AS expected
-            FROM orders
-            WHERE amount <> (CASE WHEN 'VIP_NON_TELECHARGEABLE'=ANY(items) THEN 8 ELSE 0 END + CASE WHEN 'VIP_TELECHARGEABLE'=ANY(items) THEN 10 ELSE 0 END + CASE WHEN 'REDIFFUSION'=ANY(items) THEN 10 ELSE 0 END)
-            ORDER BY id DESC LIMIT 10
-        """)]
+        # Les anciens paiements peuvent avoir été validés avec une ancienne tarification.
+        # On évite donc de les marquer comme anomalies après un changement de prix.
         rows += [f"Commande #{r['id']} en attente sans email/référence PayPal" for r in await con.fetch("SELECT id FROM orders WHERE status='WAITING_ADMIN' AND (paypal_email IS NULL OR paypal_reference IS NULL) ORDER BY id DESC LIMIT 10")]
         rows += [f"Abonnement #{r['id']} expiré encore actif user {r['user_id']}" for r in await con.fetch("SELECT id,user_id FROM subscriptions WHERE active=true AND expires_at <= now() ORDER BY expires_at LIMIT 10")]
         return rows[:30]

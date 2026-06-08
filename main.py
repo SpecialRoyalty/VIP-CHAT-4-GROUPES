@@ -51,7 +51,7 @@ def format_order_text(order, username: str | None = None) -> str:
         f"Utilisateur : {who}\n"
         f"ID : {order['user_id']}\n"
         f"Choix : {svc.item_text(order['items'])}\n"
-        f"Montant : {order['amount']}€\n"
+        f"Montant : {svc.eur(order['amount'])}\n"
         f"Promo : {order['promo_code'] or '—'}\n"
         f"Durée : {order['duration_days'] or 30} jours\n"
         f"Email PayPal : {order['paypal_email'] or '—'}\n"
@@ -239,6 +239,35 @@ async def cb_paypal(c: CallbackQuery):
     await c.message.answer('💳 PayPal actuel :\n' + (settings.paypal_link or 'Non configuré') + '\n\nPour modifier : change PAYPAL_LINK dans Railway puis redémarre.')
     await c.answer()
 
+
+@r.callback_query(F.data == 'admin:pricing')
+async def cb_pricing(c: CallbackQuery):
+    if not is_admin(c.from_user.id): return await c.answer()
+    await svc.refresh_pricing()
+    await c.message.edit_text(
+        '💰 Tarification dynamique\n\n'
+        'Les changements s’appliquent aux nouvelles commandes et aux renouvellements.\n'
+        'Les abonnements déjà actifs gardent leur date d’expiration actuelle.',
+        reply_markup=kb.pricing_panel()
+    )
+    await c.answer()
+
+@r.callback_query(F.data.startswith('pricing:edit:'))
+async def cb_pricing_edit(c: CallbackQuery):
+    if not is_admin(c.from_user.id): return await c.answer()
+    key = c.data.split(':', 2)[2]
+    admin_modes[c.from_user.id] = f'pricing:{key}'
+    label = {
+        'price_VIP_NON_TELECHARGEABLE': 'prix VIP non téléchargeable',
+        'price_VIP_TELECHARGEABLE': 'prix VIP téléchargeable',
+        'price_REDIFFUSION': 'prix Rediffusion',
+        'discount_FIRST_50': 'pourcentage promo premiers entrants',
+        'discount_DISCOVERY_6D': 'pourcentage offre découverte',
+        'discount_REACTIVATION_30': 'pourcentage relance anciens',
+    }.get(key, key)
+    await c.message.answer(f'Envoie le nouveau {label}. Exemple : 10 ou 7,50')
+    await c.answer()
+
 async def get_ad_config():
     text = await db.get_setting('ad_text', '🔥 Accès VIP\n\nDémo gratuite puis abonnement mensuel. Clique ici :')
     photo = await db.get_setting('ad_photo_file_id', '')
@@ -347,9 +376,9 @@ async def cb_promos(c: CallbackQuery):
     er = (await db.get_setting('promo_REACTIVATION_30', 'OFF')) == 'ON'
     await c.message.edit_text(
         '🎯 Campagnes promo\n\n'
-        '- -50% : uniquement les nouveaux prospects qui n’ont jamais payé.\n'
+        f"- Promo premiers entrants : -{svc.eur(svc.DISCOUNTS['FIRST_50']).replace('€','%')} uniquement pour ceux qui n’ont jamais payé.\n"
         '- 2 mois achetés = 1 mois offert : le client paie bien 2 mois, puis reçoit 3 mois d’accès.\n'
-        '- Relance anciens -30% : anciens abonnés expirés depuis 10 jours minimum, offre valable 24h.',
+        f"- Relance anciens : -{svc.eur(svc.DISCOUNTS['REACTIVATION_30']).replace('€','%')} pour anciens abonnés expirés depuis 10 jours minimum, offre valable 24h.",
         reply_markup=kb.promo_panel(e50, e2, er)
     )
     await c.answer()
@@ -367,10 +396,10 @@ async def cb_promo_toggle(c: CallbackQuery):
 async def cb_send_reactivation(c: CallbackQuery):
     if not is_admin(c.from_user.id): return await c.answer()
     if (await db.get_setting('promo_REACTIVATION_30', 'OFF')) != 'ON':
-        return await c.answer('Active d’abord le bouton Relance anciens -30%.', show_alert=True)
+        return await c.answer(f"Active d’abord le bouton Relance anciens -{svc.eur(svc.DISCOUNTS['REACTIVATION_30']).replace('€','%')}.", show_alert=True)
     sent = 0
     for u in await db.reactivation_candidates():
-        ok = await svc.safe_send(bot, u['user_id'], '🎁 Offre retour VIP\n\nDu nouveau contenu a été ajouté. Profite de -30% pour revenir.\n\nOffre valable 24h.', reply_markup=kb.offer_keyboard(promo='REACTIVATION_30'))
+        ok = await svc.safe_send(bot, u['user_id'], f"🎁 Offre retour VIP\n\nDu nouveau contenu a été ajouté. Profite de -{svc.eur(svc.DISCOUNTS['REACTIVATION_30']).replace('€','%')} pour revenir.\n\nOffre valable 24h.", reply_markup=kb.offer_keyboard(promo='REACTIVATION_30'))
         if ok:
             await db.mark_reactivation_offer_sent(u['user_id'])
             sent += 1
@@ -433,7 +462,7 @@ async def cb_offer6_next(c: CallbackQuery):
     total = svc.amount(sel, 'DISCOVERY_6D')
     order_id = await db.create_order(c.from_user.id, list(sel), total, promo_code='DISCOVERY_6D', duration_days=6)
     await db.mark_discovery_offer_used(c.from_user.id)
-    await c.message.answer(f'💳 Montant offre découverte : {total}€ / 6 jours\n\nPayPal :\n{settings.paypal_link}\n\nCommande #{order_id}\n\nÉtape 1/3 : envoie maintenant UNE capture du paiement.', reply_markup=kb.payment_wait_keyboard())
+    await c.message.answer(f'💳 Montant offre découverte : {svc.eur(total)} / 6 jours\n\nPayPal :\n{settings.paypal_link}\n\nCommande #{order_id}\n\nÉtape 1/3 : envoie maintenant UNE capture du paiement.', reply_markup=kb.payment_wait_keyboard())
     await c.answer()
 
 @r.callback_query(F.data == 'admin:orders')
@@ -463,9 +492,9 @@ async def cb_accounting(c: CallbackQuery):
     anomalies = await db.accounting_anomalies()
     txt = (
         '📒 Comptabilité\n\n'
-        f"Montant total encaissé : {s['total_amount']}€\n"
-        f"Montant encaissé aujourd’hui : {s['today_amount']}€\n"
-        f"Montant encaissé ce mois : {s['month_amount']}€\n\n"
+        f"Montant total encaissé : {svc.eur(s['total_amount'])}\n"
+        f"Montant encaissé aujourd’hui : {svc.eur(s['today_amount'])}\n"
+        f"Montant encaissé ce mois : {svc.eur(s['month_amount'])}\n\n"
         f"Commandes validées : {s['approved']}\n"
         f"Commandes refusées : {s['rejected']}\n"
         f"Commandes en attente : {s['pending']}\n\n"
@@ -558,13 +587,13 @@ async def cb_offer_next(c: CallbackQuery):
     label = 'mensuel'
     if await db.reactivation_offer_active(c.from_user.id):
         promo_code = 'REACTIVATION_30'
-        label = 'offre retour -30%'
+        label = f"offre retour -{svc.eur(svc.DISCOUNTS['REACTIVATION_30']).replace('€','%')}"
         await db.mark_reactivation_offer_used(c.from_user.id)
     elif await db.first_promo_active_for_user(c.from_user.id):
         if (await db.get_setting('promo_FIRST_2PLUS1', 'OFF')) == 'ON' and (await db.get_setting('promo_FIRST_50', 'OFF')) != 'ON':
             promo_code = 'FIRST_2PLUS1'
             duration_days = settings.subscription_days * 3
-            total = svc.amount(sel) * 2
+            total = svc.amount(sel, 'FIRST_2PLUS1')
             await db.mark_first_promo_used(c.from_user.id)
         elif (await db.get_setting('promo_FIRST_50', 'OFF')) == 'ON':
             promo_code = 'FIRST_50'
@@ -575,7 +604,7 @@ async def cb_offer_next(c: CallbackQuery):
     order_id = await db.create_order(c.from_user.id, list(sel), total, promo_code=promo_code, duration_days=duration_days)
     duration_txt = '3 mois' if promo_code == 'FIRST_2PLUS1' else ('6 jours' if promo_code == 'DISCOVERY_6D' else f'{duration_days} jours')
     await c.message.answer(
-        f'💳 Montant ({label}) : {total}€\n'
+        f'💳 Montant ({label}) : {svc.eur(total)}\n'
         f'Durée d’accès après validation : {duration_txt}\n\n'
         f'PayPal :\n{settings.paypal_link}\n\n'
         f'Commande #{order_id}\n\n'
@@ -594,6 +623,23 @@ async def private_text_inputs(message: Message):
             await db.set_setting('ad_text', message.text)
             admin_modes.pop(message.from_user.id, None)
             await message.answer('✅ Texte de publicité enregistré.', reply_markup=kb.ads_panel())
+            return
+        if mode and mode.startswith('pricing:'):
+            key = mode.split(':', 1)[1]
+            raw = (message.text or '').strip().replace(',', '.')
+            try:
+                val = svc.money(raw)
+                if val < 0:
+                    raise ValueError()
+                if key.startswith('discount_') and val > 100:
+                    await message.answer('Le pourcentage doit être entre 0 et 100.')
+                    return
+                await db.set_pricing_value(key, str(val))
+                await svc.refresh_pricing()
+                admin_modes.pop(message.from_user.id, None)
+                await message.answer('✅ Tarification mise à jour. Les abonnements en cours ne sont pas raccourcis ; le nouveau prix s’applique aux nouvelles commandes et renouvellements.', reply_markup=kb.pricing_panel())
+            except Exception:
+                await message.answer('Valeur invalide. Envoie un nombre, par exemple 10 ou 7,50.')
             return
     order = await db.current_open_order(message.from_user.id)
     if not order:
@@ -749,7 +795,7 @@ async def marketing_followups():
             stats['second_demo_sent'] += 1
     # 2 jours plus tard, toujours pas payé : offre découverte 6 jours, valable 24h, une seule fois.
     for u in await db.discovery_offer_candidates():
-        ok = await svc.safe_send(bot, u['user_id'], '🎁 Offre découverte valable 24h :\n\nVIP non téléchargeable — 5€ / 6 jours\nRediffusion — 5€ / 6 jours', reply_markup=kb.discovery_offer_keyboard())
+        ok = await svc.safe_send(bot, u['user_id'], f"🎁 Offre découverte valable 24h :\n\nVIP non téléchargeable — {svc.eur(svc.promo_price('VIP_NON_TELECHARGEABLE', 'DISCOVERY_6D'))} / 6 jours\nRediffusion — {svc.eur(svc.promo_price('REDIFFUSION', 'DISCOVERY_6D'))} / 6 jours", reply_markup=kb.discovery_offer_keyboard())
         if ok:
             await db.mark_discovery_offer_sent(u['user_id'])
             stats['discovery_sent'] += 1
@@ -770,6 +816,7 @@ async def monthly_reminders_and_expiry():
 
 async def main():
     await db.connect(settings.database_url)
+    await svc.refresh_pricing()
     scheduler = AsyncIOScheduler(timezone=settings.timezone)
     scheduler.add_job(kick_expired_demos, 'interval', minutes=1, id='kick_demos', replace_existing=True)
     scheduler.add_job(monthly_reminders_and_expiry, 'interval', hours=6, id='monthly', replace_existing=True)

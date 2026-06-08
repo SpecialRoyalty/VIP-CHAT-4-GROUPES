@@ -1,4 +1,5 @@
 from datetime import datetime, timedelta, timezone
+from decimal import Decimal, ROUND_HALF_UP
 from aiogram import Bot
 from aiogram.exceptions import TelegramForbiddenError, TelegramBadRequest
 import db
@@ -9,11 +10,41 @@ LABELS = {
     'VIP_TELECHARGEABLE': 'VIP téléchargeable',
     'REDIFFUSION': 'Rediffusion téléchargeable',
 }
-PRICES = {'VIP_NON_TELECHARGEABLE': 8, 'VIP_TELECHARGEABLE': 10, 'REDIFFUSION': 10}
-PROMO_FIRST_50_PRICES = {'VIP_NON_TELECHARGEABLE': 4, 'VIP_TELECHARGEABLE': 5, 'REDIFFUSION': 5}
-DISCOVERY_6D_PRICES = {'VIP_NON_TELECHARGEABLE': 5, 'REDIFFUSION': 5}
-REACTIVATION_30_PRICES = {'VIP_NON_TELECHARGEABLE': 6, 'VIP_TELECHARGEABLE': 7, 'REDIFFUSION': 7}
 
+PRICES = {'VIP_NON_TELECHARGEABLE': Decimal('10'), 'VIP_TELECHARGEABLE': Decimal('16'), 'REDIFFUSION': Decimal('15')}
+DISCOUNTS = {'FIRST_50': Decimal('50'), 'DISCOVERY_6D': Decimal('50'), 'REACTIVATION_30': Decimal('30')}
+
+def money(v) -> Decimal:
+    return Decimal(str(v)).quantize(Decimal('0.01'), rounding=ROUND_HALF_UP)
+
+def eur(v) -> str:
+    d = money(v)
+    if d == d.to_integral_value():
+        return f"{int(d)}€"
+    return f"{str(d).replace('.', ',')}€"
+
+async def refresh_pricing():
+    data = await db.pricing_settings()
+    PRICES['VIP_NON_TELECHARGEABLE'] = money(data.get('price_VIP_NON_TELECHARGEABLE', '10'))
+    PRICES['VIP_TELECHARGEABLE'] = money(data.get('price_VIP_TELECHARGEABLE', '16'))
+    PRICES['REDIFFUSION'] = money(data.get('price_REDIFFUSION', '15'))
+    DISCOUNTS['FIRST_50'] = money(data.get('discount_FIRST_50', '50'))
+    DISCOUNTS['DISCOVERY_6D'] = money(data.get('discount_DISCOVERY_6D', '50'))
+    DISCOUNTS['REACTIVATION_30'] = money(data.get('discount_REACTIVATION_30', '30'))
+    return PRICES
+
+def discounted(price: Decimal, percent: Decimal) -> Decimal:
+    return money(price * (Decimal('100') - percent) / Decimal('100'))
+
+def promo_price(item: str, promo_code: str | None = None) -> Decimal:
+    base = PRICES[item]
+    if promo_code == 'FIRST_50':
+        return discounted(base, DISCOUNTS['FIRST_50'])
+    if promo_code == 'DISCOVERY_6D':
+        return discounted(base, DISCOUNTS['DISCOVERY_6D'])
+    if promo_code == 'REACTIVATION_30':
+        return discounted(base, DISCOUNTS['REACTIVATION_30'])
+    return base
 
 def validate_items(items: set[str]) -> tuple[bool, str]:
     if not items:
@@ -24,20 +55,21 @@ def validate_items(items: set[str]) -> tuple[bool, str]:
         return False, 'Choix invalide.'
     return True, ''
 
+def validate_discovery_items(items: set[str]) -> tuple[bool, str]:
+    ok, msg = validate_items(items)
+    if not ok:
+        return ok, msg
+    if 'VIP_TELECHARGEABLE' in items:
+        return False, "L'offre découverte ne contient pas le VIP téléchargeable."
+    return True, ''
 
-def amount(items: set[str], promo_code: str | None = None) -> int:
-    if promo_code == 'FIRST_50':
-        return sum(PROMO_FIRST_50_PRICES[i] for i in items)
-    if promo_code == 'DISCOVERY_6D':
-        return sum(DISCOVERY_6D_PRICES[i] for i in items)
-    if promo_code == 'REACTIVATION_30':
-        return sum(REACTIVATION_30_PRICES[i] for i in items)
-    return sum(PRICES[i] for i in items)
-
+def amount(items: set[str], promo_code: str | None = None) -> Decimal:
+    if promo_code == 'FIRST_2PLUS1':
+        return money(sum(PRICES[i] for i in items) * 2)
+    return money(sum(promo_price(i, promo_code) for i in items))
 
 def item_text(items) -> str:
     return ' + '.join(LABELS[i] for i in items)
-
 
 def group_types_for_items(items) -> list[str]:
     mapping = {
