@@ -33,6 +33,29 @@ REFUSAL_LABELS = {
 def is_admin(user_id: int) -> bool:
     return user_id in settings.admin_ids
 
+
+
+async def find_expired_access_anomalies(limit: int = 50):
+    """Vérifie côté Telegram les abonnements expirés dont l'utilisateur est encore dans un groupe VIP."""
+    anomalies = []
+    for sub in await db.expired_subscriptions_for_access_check(limit):
+        for typ in svc.group_types_for_items(list(sub['items'])):
+            for g in await db.group_by_type(typ):
+                present, status = await svc.user_is_member(bot, g['chat_id'], sub['user_id'])
+                if present:
+                    anomalies.append({
+                        'sub_id': sub['id'],
+                        'user_id': sub['user_id'],
+                        'username': sub['username'],
+                        'items': list(sub['items']),
+                        'group_type': typ,
+                        'chat_id': g['chat_id'],
+                        'group_title': g['title'],
+                        'expires_at': sub['expires_at'],
+                        'status': status,
+                    })
+    return anomalies
+
 async def admin_panel_markup():
     return kb.admin_panel(await db.unread_pending_count())
 
@@ -518,6 +541,44 @@ async def cb_accounting_check(c: CallbackQuery):
         await c.message.answer('⚠️ Anomalies détectées :\n\n' + '\n'.join('- ' + a for a in anomalies))
     await c.answer()
 
+@r.callback_query(F.data == 'accounting:access_check')
+async def cb_accounting_access_check(c: CallbackQuery):
+    if not is_admin(c.from_user.id): return await c.answer()
+    await c.answer('Vérification des accès en cours...')
+    anomalies = await find_expired_access_anomalies(80)
+    if not anomalies:
+        return await c.message.answer('✅ Accès OK. Aucun abonné expiré encore présent dans les groupes VIP.')
+    lines = ['⚠️ Abonnés expirés encore présents dans un groupe VIP :']
+    seen = set()
+    compact = []
+    for a in anomalies:
+        key = a['sub_id']
+        if key not in seen:
+            compact.append(a)
+            seen.add(key)
+        username = '@' + a['username'] if a.get('username') else f"ID {a['user_id']}"
+        lines.append(f"\nUtilisateur : {username}\nAbonnement : #{a['sub_id']} expiré le {a['expires_at']:%d/%m/%Y}\nPrésent dans : {a['group_title']} ({a['group_type']})\nStatus Telegram : {a['status']}")
+    await c.message.answer('\n'.join(lines[:60]), reply_markup=kb.access_anomalies_panel(compact))
+
+@r.callback_query(F.data.startswith('accounting:kicksub:'))
+async def cb_accounting_kick_subscription(c: CallbackQuery):
+    if not is_admin(c.from_user.id): return await c.answer()
+    sub_id = int(c.data.split(':')[2])
+    sub = await db.get_subscription(sub_id)
+    if not sub:
+        return await c.answer('Abonnement introuvable.', show_alert=True)
+    report = await svc.kick_user_from_groups(bot, sub['user_id'], list(sub['items']))
+    username = '@' + sub['username'] if sub['username'] else f"ID {sub['user_id']}"
+    if report['ok']:
+        await db.deactivate_subscription(sub_id)
+        await c.message.answer(f'✅ {username} expulsé des groupes de l’abonnement #{sub_id}.')
+        await svc.safe_send(bot, sub['user_id'], '🔒 Ton abonnement a expiré. Tu as été retiré des groupes. Renouvelle pour récupérer un accès.')
+    else:
+        await db.mark_subscription_kick_failed(sub_id, str(report['failed']))
+        await notify_admins(f"🚨 Échec expulsion abonnement #{sub_id}\nUtilisateur : {username} / {sub['user_id']}\nErreurs : {report['failed']}")
+        await c.message.answer(f"❌ Expulsion incomplète pour {username}. Les admins ont été prévenus.\nErreurs : {report['failed']}")
+    await c.answer()
+
 @r.callback_query(F.data == 'admin:subscriptions')
 async def cb_subscriptions(c: CallbackQuery):
     if not is_admin(c.from_user.id): return await c.answer()
@@ -609,7 +670,7 @@ async def cb_offer_next(c: CallbackQuery):
         f'PayPal :\n{settings.paypal_link}\n\n'
         f'Commande #{order_id}\n\n'
         'Étape 1/3 : envoie maintenant UNE capture du paiement.\n'
-        'Important : UNIQUEMENT PAYPAL ENTRE PROCHE..',
+        'Important : une seule preuve est acceptée par commande.',
         reply_markup=kb.payment_wait_keyboard()
     )
     await c.answer()
@@ -810,18 +871,24 @@ async def monthly_reminders_and_expiry():
                 await svc.safe_send(bot, sub['user_id'], f'⏳ Ton accès VIP expire dans {days} jours. Pense à renouveler pour garder ton accès.')
             await db.mark_reminded(sub['id'], days)
     for sub in await db.expired_subscriptions():
-        await svc.kick_user_from_groups(bot, sub['user_id'], list(sub['items']))
-        await db.deactivate_subscription(sub['id'])
-        await svc.safe_send(bot, sub['user_id'], '🔒 Ton abonnement a expiré. Tu as été retiré des groupes. Renouvelle pour récupérer un accès.')
+        report = await svc.kick_user_from_groups(bot, sub['user_id'], list(sub['items']))
+        if report['ok']:
+            await db.deactivate_subscription(sub['id'])
+            await svc.safe_send(bot, sub['user_id'], '🔒 Ton abonnement a expiré. Tu as été retiré des groupes. Renouvelle pour récupérer un accès.')
+        else:
+            await db.mark_subscription_kick_failed(sub['id'], str(report['failed']))
+            await notify_admins(f"🚨 Échec expulsion abonnement expiré #{sub['id']}\nUtilisateur ID : {sub['user_id']}\nErreurs : {report['failed']}")
 
 async def main():
     await db.connect(settings.database_url)
     await svc.refresh_pricing()
     scheduler = AsyncIOScheduler(timezone=settings.timezone)
     scheduler.add_job(kick_expired_demos, 'interval', minutes=1, id='kick_demos', replace_existing=True)
-    scheduler.add_job(monthly_reminders_and_expiry, 'interval', hours=6, id='monthly', replace_existing=True)
+    scheduler.add_job(monthly_reminders_and_expiry, 'interval', minutes=15, id='monthly', replace_existing=True)
     scheduler.add_job(marketing_followups, 'interval', hours=6, id='marketing_followups', replace_existing=True)
     scheduler.start()
+    asyncio.create_task(monthly_reminders_and_expiry())
+    asyncio.create_task(marketing_followups())
     await notify_admins('✅ Bot démarré sur Railway.')
     await dp.start_polling(bot)
 

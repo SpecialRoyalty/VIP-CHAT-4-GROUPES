@@ -543,3 +543,32 @@ async def reactivation_offer_active(user_id: int) -> bool:
 async def mark_reactivation_offer_used(user_id: int):
     async with pool().acquire() as con:
         await con.execute('UPDATE users SET reactivation_offer_used_at=COALESCE(reactivation_offer_used_at, now()) WHERE user_id=$1', user_id)
+
+async def get_subscription(sub_id: int):
+    async with pool().acquire() as con:
+        return await con.fetchrow('''
+            SELECT s.*, u.username, u.first_name
+            FROM subscriptions s
+            LEFT JOIN users u ON u.user_id=s.user_id
+            WHERE s.id=$1
+        ''', sub_id)
+
+async def expired_subscriptions_for_access_check(limit: int = 50):
+    async with pool().acquire() as con:
+        return await con.fetch('''
+            SELECT s.*, u.username, u.first_name
+            FROM subscriptions s
+            LEFT JOIN users u ON u.user_id=s.user_id
+            WHERE s.expires_at <= now()
+            ORDER BY s.expires_at ASC
+            LIMIT $1
+        ''', limit)
+
+async def mark_subscription_kick_failed(sub_id: int, error: str):
+    async with pool().acquire() as con:
+        await con.execute('''
+            UPDATE subscriptions
+            SET ended_at = COALESCE(ended_at, now())
+            WHERE id=$1
+        ''', sub_id)
+        await log('ERROR', f'Expiration kick abonnement #{sub_id} échoué: {error[:1000]}')

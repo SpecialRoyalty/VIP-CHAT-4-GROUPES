@@ -53,8 +53,8 @@ def offer_text(prefix: str = '') -> str:
         "• Téléchargement autorisé\n"
         "• Accès complet aux médias\n\n"
         f"🔁 Rediffusion — {svc.eur(p['REDIFFUSION'])}/mois\n"
-        "• Médias téléchargé avec nos méthodes depuis les groupes JAVANA FINISSEURS SAVONETTE tous les jours \n"
-        "• Téléchargement partiel autorisé\n"
+        "• Médias rediffusés depuis les groupes sources\n"
+        "• Téléchargement autorisé\n"
     )
 
 def offer_keyboard(selection: set[str] | None = None, promo: str | None = None) -> InlineKeyboardMarkup:
@@ -163,6 +163,7 @@ def orders_panel(orders) -> InlineKeyboardMarkup:
 def accounting_panel() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text='🔍 Vérifier cohérence globale', callback_data='accounting:check')],
+        [InlineKeyboardButton(text='🔍 Vérifier les accès', callback_data='accounting:access_check')],
         [InlineKeyboardButton(text='🔙 Retour', callback_data='admin:panel')],
     ])
 
@@ -173,3 +174,12 @@ def subscriptions_panel() -> InlineKeyboardMarkup:
         [InlineKeyboardButton(text='Expirés', callback_data='subs:expired')],
         [InlineKeyboardButton(text='🔙 Retour', callback_data='admin:panel')],
     ])
+
+
+def access_anomalies_panel(rows) -> InlineKeyboardMarkup:
+    keyboard = []
+    for r in rows[:20]:
+        username = '@' + r['username'] if r.get('username') else f"ID {r['user_id']}"
+        keyboard.append([InlineKeyboardButton(text=f"Expulser {username} — abo #{r['sub_id']}", callback_data=f"accounting:kicksub:{r['sub_id']}")])
+    keyboard.append([InlineKeyboardButton(text='🔙 Comptabilité', callback_data='admin:accounting')])
+    return InlineKeyboardMarkup(inline_keyboard=keyboard)

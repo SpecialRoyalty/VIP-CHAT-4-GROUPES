@@ -98,15 +98,47 @@ async def grant_access(bot: Bot, user_id: int, items: list[str], invite_expire_m
     await bot.send_message(user_id, '✅ Paiement validé. Voici tes accès uniques :\n\n' + '\n'.join(links) + '\n\nTon abonnement est valable 30 jours.')
     return links
 
-async def kick_user_from_groups(bot: Bot, user_id: int, items: list[str]):
+def is_member_status(status: str) -> bool:
+    return status in {'creator', 'administrator', 'member', 'restricted'}
+
+async def user_is_member(bot: Bot, chat_id: int, user_id: int) -> tuple[bool, str]:
+    try:
+        member = await bot.get_chat_member(chat_id, user_id)
+        status = str(member.status)
+        return is_member_status(status), status
+    except Exception as e:
+        return False, f'unknown:{e}'
+
+async def kick_user_from_groups(bot: Bot, user_id: int, items: list[str]) -> dict:
+    """Expulse un utilisateur de tous les groupes correspondant aux items.
+    Retourne un rapport. On ne considère pas l'opération OK si Telegram refuse le kick.
+    """
+    report = {'ok': True, 'kicked': [], 'already_out': [], 'failed': []}
     for typ in group_types_for_items(items):
         gs = await db.group_by_type(typ)
+        if not gs:
+            report['ok'] = False
+            report['failed'].append({'type': typ, 'chat_id': None, 'error': 'groupe non configuré'})
+            continue
         for g in gs:
+            chat_id = g['chat_id']
             try:
-                await bot.ban_chat_member(g['chat_id'], user_id)
-                await bot.unban_chat_member(g['chat_id'], user_id, only_if_banned=True)
+                present, status = await user_is_member(bot, chat_id, user_id)
+                if not present and not str(status).startswith('unknown:'):
+                    report['already_out'].append({'type': typ, 'chat_id': chat_id, 'status': status})
+                    continue
+                await bot.ban_chat_member(chat_id, user_id)
+                await bot.unban_chat_member(chat_id, user_id, only_if_banned=True)
+                present_after, status_after = await user_is_member(bot, chat_id, user_id)
+                if present_after:
+                    raise RuntimeError(f'utilisateur encore présent après kick, status={status_after}')
+                report['kicked'].append({'type': typ, 'chat_id': chat_id})
             except Exception as e:
-                await db.log('ERROR', f'Kick impossible user={user_id} group={g["chat_id"]}: {e}')
+                report['ok'] = False
+                err = str(e)
+                report['failed'].append({'type': typ, 'chat_id': chat_id, 'error': err})
+                await db.log('ERROR', f'Kick impossible user={user_id} group={chat_id} type={typ}: {err}')
+    return report
 
 async def verify_group(bot: Bot, chat_id: int) -> tuple[bool, str]:
     try:
