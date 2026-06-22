@@ -163,9 +163,18 @@ def orders_panel(orders) -> InlineKeyboardMarkup:
 def accounting_panel() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text='🔍 Vérifier cohérence globale', callback_data='accounting:check')],
-        [InlineKeyboardButton(text='🔍 Vérifier les accès', callback_data='accounting:access_check')],
+        [InlineKeyboardButton(text='🔍 Vérifier les accès', callback_data='accounting:check_access')],
         [InlineKeyboardButton(text='🔙 Retour', callback_data='admin:panel')],
     ])
+
+
+def access_anomalies_panel(rows) -> InlineKeyboardMarkup:
+    buttons = []
+    for r in rows[:10]:
+        label = r.get('username') or str(r['user_id'])
+        buttons.append([InlineKeyboardButton(text=f"Expulser #{r['id']} — {label}", callback_data=f"accounting:expel_sub:{r['id']}")])
+    buttons.append([InlineKeyboardButton(text='🔙 Comptabilité', callback_data='admin:accounting')])
+    return InlineKeyboardMarkup(inline_keyboard=buttons)
 
 
 def subscriptions_panel() -> InlineKeyboardMarkup:
@@ -174,12 +183,3 @@ def subscriptions_panel() -> InlineKeyboardMarkup:
         [InlineKeyboardButton(text='Expirés', callback_data='subs:expired')],
         [InlineKeyboardButton(text='🔙 Retour', callback_data='admin:panel')],
     ])
-
-
-def access_anomalies_panel(rows) -> InlineKeyboardMarkup:
-    keyboard = []
-    for r in rows[:20]:
-        username = '@' + r['username'] if r.get('username') else f"ID {r['user_id']}"
-        keyboard.append([InlineKeyboardButton(text=f"Expulser {username} — abo #{r['sub_id']}", callback_data=f"accounting:kicksub:{r['sub_id']}")])
-    keyboard.append([InlineKeyboardButton(text='🔙 Comptabilité', callback_data='admin:accounting')])
-    return InlineKeyboardMarkup(inline_keyboard=keyboard)

@@ -89,6 +89,7 @@ ALTER TABLE orders ALTER COLUMN amount TYPE NUMERIC(10,2) USING amount::numeric;
 ALTER TABLE subscriptions ADD COLUMN IF NOT EXISTS renewal_count INTEGER NOT NULL DEFAULT 0;
 ALTER TABLE subscriptions ADD COLUMN IF NOT EXISTS last_renewed_at TIMESTAMPTZ;
 ALTER TABLE subscriptions ADD COLUMN IF NOT EXISTS ended_at TIMESTAMPTZ;
+ALTER TABLE subscriptions ADD COLUMN IF NOT EXISTS last_kick_error TEXT;
 
 ALTER TABLE users ADD COLUMN IF NOT EXISTS second_demo_sent_at TIMESTAMPTZ;
 ALTER TABLE users ADD COLUMN IF NOT EXISTS second_demo_used_at TIMESTAMPTZ;
@@ -342,11 +343,43 @@ async def mark_reminded(sub_id: int, days_left: int):
 
 async def expired_subscriptions():
     async with pool().acquire() as con:
-        return await con.fetch('SELECT * FROM subscriptions WHERE active=true AND expires_at <= now()')
+        return await con.fetch('SELECT s.*, u.username, u.first_name FROM subscriptions s LEFT JOIN users u ON u.user_id=s.user_id WHERE s.active=true AND s.expires_at IS NOT NULL AND s.expires_at <= now()')
 
 async def deactivate_subscription(sub_id: int):
     async with pool().acquire() as con:
         await con.execute('UPDATE subscriptions SET active=false, ended_at=now() WHERE id=$1', sub_id)
+
+async def mark_subscription_kick_failed(sub_id: int, error: str):
+    async with pool().acquire() as con:
+        await con.execute('UPDATE subscriptions SET last_kick_error=$2 WHERE id=$1', sub_id, error[:1000])
+
+async def malformed_active_subscriptions(limit: int = 30):
+    async with pool().acquire() as con:
+        return await con.fetch('''
+            SELECT s.*, u.username, u.first_name
+            FROM subscriptions s LEFT JOIN users u ON u.user_id=s.user_id
+            WHERE s.active=true AND (s.starts_at IS NULL OR s.expires_at IS NULL)
+            ORDER BY s.id DESC LIMIT $1
+        ''', limit)
+
+async def subscription_by_id(sub_id: int):
+    async with pool().acquire() as con:
+        return await con.fetchrow('SELECT s.*, u.username, u.first_name FROM subscriptions s LEFT JOIN users u ON u.user_id=s.user_id WHERE s.id=$1', sub_id)
+
+async def expired_or_malformed_active_subscriptions(limit: int = 30):
+    async with pool().acquire() as con:
+        return await con.fetch('''
+            SELECT s.*, u.username, u.first_name,
+                   CASE
+                     WHEN s.starts_at IS NULL OR s.expires_at IS NULL THEN 'DATES_MANQUANTES'
+                     WHEN s.expires_at <= now() THEN 'EXPIRE'
+                     ELSE 'OK'
+                   END AS anomaly_reason
+            FROM subscriptions s LEFT JOIN users u ON u.user_id=s.user_id
+            WHERE s.active=true AND ((s.starts_at IS NULL OR s.expires_at IS NULL) OR s.expires_at <= now())
+            ORDER BY COALESCE(s.expires_at, s.starts_at, now()) ASC
+            LIMIT $1
+        ''', limit)
 
 async def cancel_current_order(user_id: int):
     async with pool().acquire() as con:
@@ -431,7 +464,8 @@ async def accounting_anomalies():
         # Les anciens paiements peuvent avoir été validés avec une ancienne tarification.
         # On évite donc de les marquer comme anomalies après un changement de prix.
         rows += [f"Commande #{r['id']} en attente sans email/référence PayPal" for r in await con.fetch("SELECT id FROM orders WHERE status='WAITING_ADMIN' AND (paypal_email IS NULL OR paypal_reference IS NULL) ORDER BY id DESC LIMIT 10")]
-        rows += [f"Abonnement #{r['id']} expiré encore actif user {r['user_id']}" for r in await con.fetch("SELECT id,user_id FROM subscriptions WHERE active=true AND expires_at <= now() ORDER BY expires_at LIMIT 10")]
+        rows += [f"Abonnement #{r['id']} actif sans date complète user {r['user_id']}" for r in await con.fetch("SELECT id,user_id FROM subscriptions WHERE active=true AND (starts_at IS NULL OR expires_at IS NULL) ORDER BY id DESC LIMIT 10")]
+        rows += [f"Abonnement #{r['id']} expiré mais encore actif en base user {r['user_id']}" for r in await con.fetch("SELECT id,user_id FROM subscriptions WHERE active=true AND expires_at IS NOT NULL AND expires_at <= now() ORDER BY expires_at LIMIT 10")]
         return rows[:30]
 
 async def subscriptions_list(filter_name: str = 'active', limit: int = 20):
@@ -543,32 +577,3 @@ async def reactivation_offer_active(user_id: int) -> bool:
 async def mark_reactivation_offer_used(user_id: int):
     async with pool().acquire() as con:
         await con.execute('UPDATE users SET reactivation_offer_used_at=COALESCE(reactivation_offer_used_at, now()) WHERE user_id=$1', user_id)
-
-async def get_subscription(sub_id: int):
-    async with pool().acquire() as con:
-        return await con.fetchrow('''
-            SELECT s.*, u.username, u.first_name
-            FROM subscriptions s
-            LEFT JOIN users u ON u.user_id=s.user_id
-            WHERE s.id=$1
-        ''', sub_id)
-
-async def expired_subscriptions_for_access_check(limit: int = 50):
-    async with pool().acquire() as con:
-        return await con.fetch('''
-            SELECT s.*, u.username, u.first_name
-            FROM subscriptions s
-            LEFT JOIN users u ON u.user_id=s.user_id
-            WHERE s.expires_at <= now()
-            ORDER BY s.expires_at ASC
-            LIMIT $1
-        ''', limit)
-
-async def mark_subscription_kick_failed(sub_id: int, error: str):
-    async with pool().acquire() as con:
-        await con.execute('''
-            UPDATE subscriptions
-            SET ended_at = COALESCE(ended_at, now())
-            WHERE id=$1
-        ''', sub_id)
-        await log('ERROR', f'Expiration kick abonnement #{sub_id} échoué: {error[:1000]}')
