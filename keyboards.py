@@ -17,7 +17,7 @@ def admin_panel(pending_count: int = 0) -> InlineKeyboardMarkup:
         [InlineKeyboardButton(text='💳 Paiement PayPal', callback_data='admin:paypal'), InlineKeyboardButton(text=f'📦 Suivi commandes ({pending_count})', callback_data='admin:orders')],
         [InlineKeyboardButton(text='📒 Comptabilité', callback_data='admin:accounting'), InlineKeyboardButton(text='👤 Abonnements', callback_data='admin:subscriptions')],
         [InlineKeyboardButton(text='💰 Tarification', callback_data='admin:pricing'), InlineKeyboardButton(text='🎯 Campagnes promo', callback_data='admin:promos')],
-        [InlineKeyboardButton(text='📢 Publicités', callback_data='admin:ads')],
+        [InlineKeyboardButton(text='📢 Publicités', callback_data='admin:ads'), InlineKeyboardButton(text='🛠 Réparation', callback_data='admin:repair')],
     ])
 
 
@@ -182,4 +182,19 @@ def subscriptions_panel() -> InlineKeyboardMarkup:
         [InlineKeyboardButton(text='Actifs', callback_data='subs:active'), InlineKeyboardButton(text='Expirent bientôt', callback_data='subs:expiring')],
         [InlineKeyboardButton(text='Expirés', callback_data='subs:expired')],
         [InlineKeyboardButton(text='🔙 Retour', callback_data='admin:panel')],
+    ])
+
+
+def repair_panel() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text='🔍 Diagnostic', callback_data='repair:diagnostic')],
+        [InlineKeyboardButton(text='🚑 Réparer les accès', callback_data='repair:run')],
+        [InlineKeyboardButton(text='🎁 Compensation +2 jours', callback_data='repair:compensate2')],
+        [InlineKeyboardButton(text='📊 Rapport accès', callback_data='repair:report')],
+        [InlineKeyboardButton(text='🔙 Retour', callback_data='admin:panel')],
+    ])
+
+def repair_user_access() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text='🔗 Recevoir mon accès VIP', callback_data='user:get_access')]
     ])

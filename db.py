@@ -65,6 +65,35 @@ CREATE TABLE IF NOT EXISTS events_log (
   created_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
+CREATE TABLE IF NOT EXISTS access_links (
+  id BIGSERIAL PRIMARY KEY,
+  user_id BIGINT NOT NULL REFERENCES users(user_id) ON DELETE CASCADE,
+  subscription_id BIGINT REFERENCES subscriptions(id) ON DELETE SET NULL,
+  group_type TEXT NOT NULL,
+  chat_id BIGINT NOT NULL,
+  invite_link TEXT NOT NULL,
+  sent_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  expires_at TIMESTAMPTZ NOT NULL,
+  joined_at TIMESTAMPTZ,
+  used BOOLEAN NOT NULL DEFAULT FALSE,
+  expired_alert_sent BOOLEAN NOT NULL DEFAULT FALSE,
+  repair_batch_id TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_access_links_user_chat ON access_links(user_id, chat_id);
+CREATE INDEX IF NOT EXISTS idx_access_links_pending ON access_links(expires_at) WHERE joined_at IS NULL;
+
+CREATE TABLE IF NOT EXISTS repair_runs (
+  id BIGSERIAL PRIMARY KEY,
+  run_type TEXT NOT NULL,
+  admin_id BIGINT,
+  affected_count INTEGER NOT NULL DEFAULT 0,
+  links_sent INTEGER NOT NULL DEFAULT 0,
+  errors INTEGER NOT NULL DEFAULT 0,
+  details TEXT,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+
 -- Migrations compatibles anciennes bases : ajout uniquement, jamais de DROP.
 ALTER TABLE demos ADD COLUMN IF NOT EXISTS chat_id BIGINT;
 ALTER TABLE demos ADD COLUMN IF NOT EXISTS invite_link TEXT;
@@ -577,3 +606,78 @@ async def reactivation_offer_active(user_id: int) -> bool:
 async def mark_reactivation_offer_used(user_id: int):
     async with pool().acquire() as con:
         await con.execute('UPDATE users SET reactivation_offer_used_at=COALESCE(reactivation_offer_used_at, now()) WHERE user_id=$1', user_id)
+
+
+async def active_subscriptions_all(limit: int = 5000):
+    async with pool().acquire() as con:
+        return await con.fetch("""
+            SELECT s.*, u.username, u.first_name, u.bot_blocked
+            FROM subscriptions s LEFT JOIN users u ON u.user_id=s.user_id
+            WHERE s.active=true AND s.expires_at IS NOT NULL AND s.expires_at > now()
+            ORDER BY s.expires_at ASC LIMIT $1
+        """, limit)
+
+async def compensate_active_subscriptions(days: int, admin_id: int | None = None):
+    async with pool().acquire() as con:
+        rows = await con.fetch("""
+            UPDATE subscriptions
+            SET expires_at = expires_at + ($1 || ' days')::interval
+            WHERE active=true AND expires_at IS NOT NULL AND expires_at > now()
+            RETURNING *
+        """, str(days))
+        await con.execute("""INSERT INTO repair_runs(run_type, admin_id, affected_count, details)
+                             VALUES('COMPENSATION', $1, $2, $3)""", admin_id, len(rows), f'+{days} jours')
+        return rows
+
+async def record_access_link(user_id: int, subscription_id: int | None, group_type: str, chat_id: int, invite_link: str, expires_at, repair_batch_id: str | None = None):
+    async with pool().acquire() as con:
+        return await con.fetchrow("""
+            INSERT INTO access_links(user_id, subscription_id, group_type, chat_id, invite_link, expires_at, repair_batch_id)
+            VALUES($1,$2,$3,$4,$5,$6,$7) RETURNING *
+        """, user_id, subscription_id, group_type, chat_id, invite_link, expires_at, repair_batch_id)
+
+async def mark_access_link_joined(user_id: int, chat_id: int):
+    async with pool().acquire() as con:
+        await con.execute("""
+            UPDATE access_links
+            SET joined_at=COALESCE(joined_at, now()), used=true
+            WHERE id = (
+                SELECT id FROM access_links
+                WHERE user_id=$1 AND chat_id=$2 AND joined_at IS NULL
+                ORDER BY sent_at DESC LIMIT 1
+            )
+        """, user_id, chat_id)
+
+async def expired_unused_access_links(limit: int = 50):
+    async with pool().acquire() as con:
+        return await con.fetch("""
+            SELECT al.*, u.username, u.first_name
+            FROM access_links al LEFT JOIN users u ON u.user_id=al.user_id
+            WHERE al.joined_at IS NULL AND al.expires_at <= now() AND al.expired_alert_sent=false
+            ORDER BY al.expires_at ASC LIMIT $1
+        """, limit)
+
+async def mark_access_link_alerted(link_id: int):
+    async with pool().acquire() as con:
+        await con.execute('UPDATE access_links SET expired_alert_sent=true WHERE id=$1', link_id)
+
+async def recent_access_stats():
+    async with pool().acquire() as con:
+        return await con.fetch("""
+            SELECT group_type,
+                   COUNT(*) AS sent,
+                   COUNT(*) FILTER (WHERE joined_at IS NOT NULL) AS joined,
+                   COUNT(*) FILTER (WHERE joined_at IS NULL AND expires_at > now()) AS pending,
+                   COUNT(*) FILTER (WHERE joined_at IS NULL AND expires_at <= now()) AS expired_unused
+            FROM access_links
+            WHERE sent_at >= now() - interval '7 days'
+            GROUP BY group_type
+            ORDER BY group_type
+        """)
+
+async def create_repair_run(run_type: str, admin_id: int | None, affected_count: int = 0, links_sent: int = 0, errors: int = 0, details: str | None = None):
+    async with pool().acquire() as con:
+        return await con.fetchrow("""
+            INSERT INTO repair_runs(run_type, admin_id, affected_count, links_sent, errors, details)
+            VALUES($1,$2,$3,$4,$5,$6) RETURNING *
+        """, run_type, admin_id, affected_count, links_sent, errors, details)

@@ -1,8 +1,9 @@
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal, ROUND_HALF_UP
 from aiogram import Bot
-from aiogram.exceptions import TelegramForbiddenError, TelegramBadRequest
+from aiogram.exceptions import TelegramForbiddenError, TelegramBadRequest, TelegramRetryAfter
 import db
+import asyncio
 
 VALID_ITEMS = {'VIP_NON_TELECHARGEABLE', 'VIP_TELECHARGEABLE', 'REDIFFUSION'}
 LABELS = {
@@ -87,15 +88,25 @@ async def configured_group(bot: Bot, group_type: str):
 
 async def create_unique_invite(bot: Bot, chat_id: int, minutes: int) -> str:
     expire = datetime.now(timezone.utc) + timedelta(minutes=minutes)
-    link = await bot.create_chat_invite_link(chat_id=chat_id, expire_date=expire, member_limit=1, creates_join_request=False)
-    return link.invite_link
+    last_error = None
+    for attempt in range(3):
+        try:
+            link = await bot.create_chat_invite_link(chat_id=chat_id, expire_date=expire, member_limit=1, creates_join_request=False)
+            return link.invite_link
+        except TelegramRetryAfter as e:
+            last_error = e
+            await asyncio.sleep(int(getattr(e, 'retry_after', 5)) + 1)
+    raise last_error or RuntimeError('Création du lien impossible')
 
-async def grant_access(bot: Bot, user_id: int, items: list[str], invite_expire_minutes: int) -> list[str]:
+async def grant_access(bot: Bot, user_id: int, items: list[str], invite_expire_minutes: int, subscription_id: int | None = None, repair_batch_id: str | None = None) -> list[str]:
     links = []
+    expire_at = datetime.now(timezone.utc) + timedelta(minutes=invite_expire_minutes)
     for typ in group_types_for_items(items):
         group = await configured_group(bot, typ)
-        links.append(await create_unique_invite(bot, group['chat_id'], invite_expire_minutes))
-    await bot.send_message(user_id, '✅ Paiement validé. Voici tes accès uniques :\n\n' + '\n'.join(links) + '\n\nTon abonnement est valable 30 jours.')
+        invite = await create_unique_invite(bot, group['chat_id'], invite_expire_minutes)
+        await db.record_access_link(user_id, subscription_id, typ, group['chat_id'], invite, expire_at, repair_batch_id)
+        links.append(f"{LABELS.get(typ, typ)} : {invite}")
+    await bot.send_message(user_id, '✅ Voici tes accès uniques :\n\n' + '\n'.join(links) + '\n\nChaque lien est valable 24h et utilisable une seule fois.')
     return links
 
 async def kick_user_from_groups(bot: Bot, user_id: int, items: list[str]) -> tuple[bool, list[str]]:
@@ -147,3 +158,20 @@ async def safe_send(bot: Bot, user_id: int, text: str, **kwargs) -> bool:
     except TelegramForbiddenError:
         await db.mark_bot_blocked(user_id)
         return False
+
+
+async def is_member_of_group(bot: Bot, chat_id: int, user_id: int) -> bool:
+    try:
+        member = await bot.get_chat_member(chat_id, user_id)
+        return member.status in {'member', 'administrator', 'creator', 'restricted'}
+    except Exception:
+        return False
+
+async def missing_access_groups(bot: Bot, user_id: int, items: list[str]) -> list[dict]:
+    missing = []
+    for typ in group_types_for_items(items):
+        gs = await db.group_by_type(typ)
+        for g in gs:
+            if not await is_member_of_group(bot, g['chat_id'], user_id):
+                missing.append({'type': typ, 'chat_id': g['chat_id'], 'title': g.get('title')})
+    return missing

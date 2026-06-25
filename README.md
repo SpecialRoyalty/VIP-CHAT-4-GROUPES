@@ -56,3 +56,25 @@ Cette version ajoute, sans supprimer les anciennes données :
 - Aucun client ayant déjà payé au moins une fois ne reçoit les promos nouveaux prospects.
 
 Les migrations sont additives : nouvelles colonnes dans `users` et `orders`, aucun DROP.
+
+## Module réparation / reprise après incident
+
+Nouveau menu admin : `🛠 Réparation`.
+
+Fonctions ajoutées :
+
+- `🔍 Diagnostic` : vérifie les abonnés actifs, les groupes configurés et les accès manquants.
+- `🚑 Réparer les accès` : renvoie des liens frais, valables 24h et utilisables une seule fois, uniquement aux abonnés actifs qui ne sont pas dans les groupes correspondant à leur offre.
+- `🎁 Compensation +2 jours` : ajoute 2 jours uniquement aux abonnements actifs non expirés et envoie un message avec les jours restants et la nouvelle date d'expiration.
+- `📊 Rapport accès` : affiche les liens envoyés, rejoints, en attente et expirés sans utilisation.
+
+Le bot surveille aussi les liens VIP envoyés : si un lien expire sans que l'utilisateur rejoigne le groupe, les admins reçoivent une alerte.
+
+Variables optionnelles :
+
+```env
+DEMO_INVITE_EXPIRE_MINUTES=5
+VIP_INVITE_EXPIRE_MINUTES=1440
+```
+
+`VIP_INVITE_EXPIRE_MINUTES=1440` correspond à 24h.

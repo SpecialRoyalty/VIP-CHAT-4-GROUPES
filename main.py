@@ -147,7 +147,7 @@ async def give_demo(message: Message):
         return
     try:
         first_50 = ((await db.get_setting('promo_FIRST_50', 'OFF')) == 'ON' or (await db.get_setting('promo_FIRST_2PLUS1', 'OFF')) == 'ON') and await db.eligible_first_promo(user_id)
-        link = await svc.create_unique_invite(bot, gs[0]['chat_id'], settings.invite_expire_minutes)
+        link = await svc.create_unique_invite(bot, gs[0]['chat_id'], settings.demo_invite_expire_minutes)
         await db.create_demo(user_id, gs[0]['chat_id'], link)
         if first_50:
             await db.mark_first_promo_sent(user_id)
@@ -159,9 +159,10 @@ async def give_demo(message: Message):
 @r.chat_member()
 async def user_joined_group(event: ChatMemberUpdated):
     if event.new_chat_member.status in {'member', 'administrator'}:
+        user_id = event.new_chat_member.user.id
+        await db.mark_access_link_joined(user_id, event.chat.id)
         gs = await db.group_by_type('VIP_PREVIEW')
         if gs and event.chat.id == gs[0]['chat_id']:
-            user_id = event.new_chat_member.user.id
             demo = await db.demo_for_user(user_id)
             if demo and demo['kicked_at'] is None:
                 await db.set_demo_joined(user_id)
@@ -428,7 +429,7 @@ async def cb_second_demo(c: CallbackQuery):
         await notify_admins('❌ VIP_PREVIEW non configuré : impossible de donner une deuxième démo.')
         return await c.answer('Démo temporairement indisponible.', show_alert=True)
     try:
-        link = await svc.create_unique_invite(bot, gs[0]['chat_id'], settings.invite_expire_minutes)
+        link = await svc.create_unique_invite(bot, gs[0]['chat_id'], settings.demo_invite_expire_minutes)
         await db.create_demo(c.from_user.id, gs[0]['chat_id'], link)
         await db.mark_second_demo_used(c.from_user.id)
         await c.message.answer('✅ Voici ton nouvel accès démo unique :\n' + link)
@@ -778,11 +779,11 @@ async def cb_approve(c: CallbackQuery):
     old_items = set(old_sub['items']) if old_sub else set()
     new_items = set(order['items'])
     removed_items = list(old_items - new_items)
-    await db.activate_subscription(order['user_id'], list(order['items']), order_id, int(order['duration_days'] or settings.subscription_days))
+    sub = await db.activate_subscription(order['user_id'], list(order['items']), order_id, int(order['duration_days'] or settings.subscription_days))
     if removed_items:
         await svc.kick_user_from_groups(bot, order['user_id'], removed_items)
     try:
-        await svc.grant_access(bot, order['user_id'], list(order['items']), settings.invite_expire_minutes)
+        await svc.grant_access(bot, order['user_id'], list(order['items']), settings.vip_invite_expire_minutes, subscription_id=sub['id'])
     except Exception as e:
         await notify_admins(f'❌ Paiement validé mais accès non envoyé pour commande #{order_id}: {e}')
     await clear_order_notifications(order_id, f"Commande #{order_id} traitée par @{c.from_user.username or c.from_user.id}\nDécision : validée")
@@ -868,6 +869,198 @@ async def monthly_reminders_and_expiry():
                 + '\n'.join(errors[:5])
             )
 
+
+
+@r.callback_query(F.data == 'admin:repair')
+async def cb_repair(c: CallbackQuery):
+    if not is_admin(c.from_user.id):
+        return await c.answer()
+    await c.message.edit_text(
+        '🛠 Réparation\n\nUtilise ce menu après un incident de groupes, une perte de droits ou des liens expirés.',
+        reply_markup=kb.repair_panel()
+    )
+    await c.answer()
+
+async def build_repair_diagnostic(limit: int = 500):
+    subs = await db.active_subscriptions_all(limit)
+    required_by_type = {'VIP_NON_TELECHARGEABLE': 0, 'VIP_TELECHARGEABLE': 0, 'REDIFFUSION': 0}
+    missing_by_type = {'VIP_NON_TELECHARGEABLE': 0, 'VIP_TELECHARGEABLE': 0, 'REDIFFUSION': 0}
+    missing_users = 0
+    errors = []
+    for sub in subs:
+        user_missing = False
+        for typ in svc.group_types_for_items(list(sub['items'])):
+            required_by_type[typ] = required_by_type.get(typ, 0) + 1
+            groups = await db.group_by_type(typ)
+            if not groups:
+                missing_by_type[typ] = missing_by_type.get(typ, 0) + 1
+                user_missing = True
+                errors.append(f'Groupe {typ} non configuré')
+                continue
+            present_any = False
+            for g in groups:
+                if await svc.is_member_of_group(bot, g['chat_id'], sub['user_id']):
+                    present_any = True
+                    break
+            if not present_any:
+                missing_by_type[typ] = missing_by_type.get(typ, 0) + 1
+                user_missing = True
+        if user_missing:
+            missing_users += 1
+    return subs, required_by_type, missing_by_type, missing_users, errors
+
+@r.callback_query(F.data == 'repair:diagnostic')
+async def cb_repair_diagnostic(c: CallbackQuery):
+    if not is_admin(c.from_user.id):
+        return await c.answer()
+    await c.answer('Diagnostic en cours...')
+    subs, req, miss, missing_users, errors = await build_repair_diagnostic()
+    lines = [
+        '🔍 Diagnostic réparation',
+        '',
+        f'Abonnés actifs analysés : {len(subs)}',
+        f'Abonnés avec accès manquant : {missing_users}',
+        '',
+        'Par groupe :'
+    ]
+    for typ in ['VIP_NON_TELECHARGEABLE','VIP_TELECHARGEABLE','REDIFFUSION']:
+        lines.append(f"- {svc.LABELS[typ]} : concernés {req.get(typ,0)} / accès manquants {miss.get(typ,0)}")
+    stats = await db.recent_access_stats()
+    if stats:
+        lines += ['', 'Liens envoyés sur 7 jours :']
+        for r0 in stats:
+            lines.append(f"- {r0['group_type']} : envoyés {r0['sent']}, rejoints {r0['joined']}, en attente {r0['pending']}, expirés non utilisés {r0['expired_unused']}")
+    if errors:
+        lines += ['', '⚠️ Erreurs :'] + ['- ' + e for e in sorted(set(errors))[:10]]
+    lines.append('')
+    lines.append('✅ Aucun accès manquant détecté.' if missing_users == 0 and not errors else '⚠️ Réparation recommandée.')
+    await c.message.answer('\n'.join(lines), reply_markup=kb.repair_panel())
+
+@r.callback_query(F.data == 'repair:run')
+async def cb_repair_run(c: CallbackQuery):
+    if not is_admin(c.from_user.id):
+        return await c.answer()
+    await c.answer('Réparation lancée...')
+    progress = await c.message.answer('🚑 Réparation en cours...')
+    subs = await db.active_subscriptions_all(5000)
+    batch_id = f'repair-{c.from_user.id}-{int(asyncio.get_event_loop().time())}'
+    links_sent = 0
+    users_touched = 0
+    errors = []
+    processed = 0
+    for sub in subs:
+        processed += 1
+        user_links = []
+        user_had_missing = False
+        for typ in svc.group_types_for_items(list(sub['items'])):
+            groups = await db.group_by_type(typ)
+            if not groups:
+                errors.append(f"User {sub['user_id']} : groupe {typ} non configuré")
+                continue
+            present = False
+            for g in groups:
+                if await svc.is_member_of_group(bot, g['chat_id'], sub['user_id']):
+                    present = True
+                    break
+            if present:
+                continue
+            user_had_missing = True
+            try:
+                g = groups[0]
+                invite = await svc.create_unique_invite(bot, g['chat_id'], settings.vip_invite_expire_minutes)
+                from datetime import datetime, timezone, timedelta
+                expires_at = datetime.now(timezone.utc) + timedelta(minutes=settings.vip_invite_expire_minutes)
+                await db.record_access_link(sub['user_id'], sub['id'], typ, g['chat_id'], invite, expires_at, batch_id)
+                user_links.append(f"{svc.LABELS.get(typ, typ)} : {invite}")
+                links_sent += 1
+            except Exception as e:
+                errors.append(f"User {sub['user_id']} / {typ} : {e}")
+        if user_had_missing:
+            users_touched += 1
+            if user_links:
+                days_left = max(0, (sub['expires_at'] - __import__('datetime').datetime.now(__import__('datetime').timezone.utc)).days)
+                text = (
+                    '🔗 Mise à jour de tes accès VIP\n\n'
+                    'Nous avons vérifié ton abonnement et généré de nouveaux liens d’accès pour les groupes manquants.\n\n'
+                    + '\n'.join(user_links) +
+                    f"\n\n📅 Jours restants : {days_left} jour(s)\n"
+                    f"📆 Expiration : {sub['expires_at']:%d/%m/%Y %H:%M}\n\n"
+                    'Chaque lien est valable 24h et utilisable une seule fois.'
+                )
+                ok = await svc.safe_send(bot, sub['user_id'], text)
+                if not ok:
+                    errors.append(f"User {sub['user_id']} : bot bloqué ou DM impossible")
+        if processed % 25 == 0:
+            try:
+                await progress.edit_text(f'🚑 Réparation en cours...\n\n{processed}/{len(subs)} abonnés analysés\nLiens envoyés : {links_sent}\nErreurs : {len(errors)}')
+            except Exception:
+                pass
+    await db.create_repair_run('REPAIR_ACCESS', c.from_user.id, users_touched, links_sent, len(errors), '\n'.join(errors[:50]))
+    await progress.edit_text(f'✅ Réparation terminée\n\nAbonnés analysés : {len(subs)}\nAbonnés concernés : {users_touched}\nLiens envoyés : {links_sent}\nErreurs : {len(errors)}')
+    if errors:
+        await notify_admins('⚠️ Erreurs pendant réparation accès :\n\n' + '\n'.join(errors[:20]))
+
+@r.callback_query(F.data == 'repair:compensate2')
+async def cb_repair_compensate2(c: CallbackQuery):
+    if not is_admin(c.from_user.id):
+        return await c.answer()
+    rows = await db.compensate_active_subscriptions(2, c.from_user.id)
+    sent = 0
+    for sub in rows:
+        days_left = max(0, (sub['expires_at'] - __import__('datetime').datetime.now(__import__('datetime').timezone.utc)).days)
+        text = (
+            '👋 Bonjour !\n\n'
+            'Nous avons effectué une maintenance afin de garantir le bon fonctionnement des accès VIP.\n\n'
+            'Par mesure de précaution, 2 jours ont été ajoutés gratuitement à ton abonnement.\n\n'
+            f'📅 Jours restants : {days_left} jour(s)\n'
+            f"📆 Nouvelle expiration : {sub['expires_at']:%d/%m/%Y %H:%M}\n\n"
+            'Si tu n’as pas encore rejoint ton groupe VIP, clique ci-dessous pour recevoir ton accès.'
+        )
+        if await svc.safe_send(bot, sub['user_id'], text, reply_markup=kb.repair_user_access()):
+            sent += 1
+    await c.message.answer(f'🎁 Compensation +2 jours appliquée.\n\nAbonnés concernés : {len(rows)}\nMessages envoyés : {sent}', reply_markup=kb.repair_panel())
+    await c.answer()
+
+@r.callback_query(F.data == 'repair:report')
+async def cb_repair_report(c: CallbackQuery):
+    if not is_admin(c.from_user.id):
+        return await c.answer()
+    stats = await db.recent_access_stats()
+    lines = ['📊 Rapport accès', '', 'Sur les 7 derniers jours :']
+    if not stats:
+        lines.append('Aucun lien suivi récemment.')
+    for r0 in stats:
+        lines.append(f"\n{r0['group_type']}\n- Liens envoyés : {r0['sent']}\n- Ont rejoint : {r0['joined']}\n- En attente : {r0['pending']}\n- Expirés non utilisés : {r0['expired_unused']}")
+    await c.message.answer('\n'.join(lines), reply_markup=kb.repair_panel())
+    await c.answer()
+
+@r.callback_query(F.data == 'user:get_access')
+async def cb_user_get_access(c: CallbackQuery):
+    sub = await db.active_subscription(c.from_user.id)
+    if not sub or not sub['expires_at'] or sub['expires_at'] <= __import__('datetime').datetime.now(__import__('datetime').timezone.utc):
+        await c.answer('Aucun abonnement actif trouvé.', show_alert=True)
+        return
+    try:
+        await svc.grant_access(bot, c.from_user.id, list(sub['items']), settings.vip_invite_expire_minutes, subscription_id=sub['id'])
+        await c.answer('Nouveaux liens envoyés en message privé.', show_alert=True)
+    except Exception as e:
+        await c.answer('Impossible de générer les liens. Un admin est prévenu.', show_alert=True)
+        await notify_admins(f'🚨 Erreur récupération accès utilisateur {c.from_user.id}: {e}')
+
+async def access_link_expiry_watch():
+    for link in await db.expired_unused_access_links(50):
+        username = ('@' + link['username']) if link.get('username') else f"ID {link['user_id']}"
+        await notify_admins(
+            '⚠️ Lien VIP expiré sans utilisation\n\n'
+            f'Utilisateur : {username}\n'
+            f"ID : {link['user_id']}\n"
+            f"Groupe : {link['group_type']}\n"
+            f"Lien envoyé : {link['sent_at']:%d/%m/%Y %H:%M}\n"
+            f"Expiré : {link['expires_at']:%d/%m/%Y %H:%M}\n\n"
+            'Action conseillée : 🛠 Réparation → 🚑 Réparer les accès.'
+        )
+        await db.mark_access_link_alerted(link['id'])
+
 async def main():
     await db.connect(settings.database_url)
     await svc.refresh_pricing()
@@ -875,6 +1068,7 @@ async def main():
     scheduler.add_job(kick_expired_demos, 'interval', minutes=1, id='kick_demos', replace_existing=True)
     scheduler.add_job(monthly_reminders_and_expiry, 'interval', hours=6, id='monthly', replace_existing=True)
     scheduler.add_job(marketing_followups, 'interval', hours=6, id='marketing_followups', replace_existing=True)
+    scheduler.add_job(access_link_expiry_watch, 'interval', minutes=30, id='access_link_watch', replace_existing=True)
     scheduler.start()
     await notify_admins('✅ Bot démarré sur Railway.')
     await dp.start_polling(bot)

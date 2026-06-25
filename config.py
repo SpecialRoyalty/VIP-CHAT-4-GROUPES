@@ -26,6 +26,8 @@ class Settings:
     demo_duration_minutes: int = 4
     subscription_days: int = 30
     invite_expire_minutes: int = 60
+    demo_invite_expire_minutes: int = 5
+    vip_invite_expire_minutes: int = 1440
     timezone: str = 'Europe/Paris'
 
 
@@ -38,5 +40,7 @@ def load_settings() -> Settings:
         demo_duration_minutes=int(os.getenv('DEMO_DURATION_MINUTES', '4')),
         subscription_days=int(os.getenv('SUBSCRIPTION_DAYS', '30')),
         invite_expire_minutes=int(os.getenv('INVITE_EXPIRE_MINUTES', '60')),
+        demo_invite_expire_minutes=int(os.getenv('DEMO_INVITE_EXPIRE_MINUTES', '5')),
+        vip_invite_expire_minutes=int(os.getenv('VIP_INVITE_EXPIRE_MINUTES', '1440')),
         timezone=os.getenv('TIMEZONE', 'Europe/Paris'),
     )
