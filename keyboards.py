@@ -43,31 +43,18 @@ def offer_text(prefix: str = '') -> str:
     p = svc.PRICES
     return (
         f"{prefix}Choisis ton accès :\n\n"
-
         f"🔒 VIP non téléchargeable — {svc.eur(p['VIP_NON_TELECHARGEABLE'])}/mois\n"
         "• Accès au VIP principal\n"
-        "• +45 000 médias exclusifs\n"
-        "• Consultation directement dans Telegram\n"
+        "• Consultation dans Telegram\n"
         "• Contenu ajouté régulièrement\n"
         "• Téléchargement non inclus\n\n"
-
         f"⬇️ VIP téléchargeable — {svc.eur(p['VIP_TELECHARGEABLE'])}/mois\n"
         "• Accès au VIP principal\n"
-        "• +55 000 médias disponibles\n"
-        "• De nouveaux médias sont ajoutés progressivement par nos bots\n"
         "• Téléchargement autorisé\n"
         "• Accès complet aux médias\n\n"
-
         f"🔁 Rediffusion — {svc.eur(p['REDIFFUSION'])}/mois\n"
-        "• Médias rediffusés chaque jour depuis les groupes sources\n"
-        "• Contenu provenant des groupes de JAVANA, L'Olivette et de nombreux autres groupes Telegram\n"
-        "• +60 000 médias différents\n"
-        "• Mise à jour tous les soirs\n"
-        "• Téléchargement partiel autorisé\n\n"
-
-        "ℹ️ Les 3 VIP sont différents mais tous très intéressants et complémentaires.\n\n"
-
-        "📩 Pour tout souci ou pour payer via Revolut ou crypto, contactez : @op75x15"
+        "• Médias rediffusés depuis les groupes sources\n"
+        "• Téléchargement autorisé\n"
     )
 
 def offer_keyboard(selection: set[str] | None = None, promo: str | None = None) -> InlineKeyboardMarkup:
