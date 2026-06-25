@@ -68,7 +68,7 @@ def offer_text(prefix: str = '') -> str:
             "ℹ️ Les 3 VIP sont différents mais tous très intéressants et complémentaires.\n\n"
         
             "📩 Pour tout souci ou pour payer via Revolut ou crypto, contactez : @op75x15"
-        )
+                )
 
 def offer_keyboard(selection: set[str] | None = None, promo: str | None = None) -> InlineKeyboardMarkup:
     selection = selection or set()
